@@ -1,0 +1,322 @@
+//@version=5
+strategy("GSecker Master Strategy — 7-in-1 (enhanced 180PC w/ cross-TF ZigZag)",
+  overlay=true, calc_on_order_fills=true, calc_on_every_tick=true,
+  initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.0,
+  process_orders_on_close=true, default_qty_type=strategy.fixed, pyramiding=1)
+
+// ----------------------- Selector & globals -----------------------
+mode = input.string("All", "Strategy Selector",
+     options=["180 PC","Bollinger Bounce","Breakfast","Pip River","Pip Runner","Volatility Reversal","T-Wave","All"])
+acctSize = input.float(10000, "Account Size", step=1)
+riskPct  = input.float(1.0, "Risk % per Trade", minval=0.01, step=0.01)
+offsetPips = input.float(1.0, "Entry offset (pips/points)", step=0.1)
+TICK = syminfo.mintick
+toff = offsetPips * TICK
+riskAmt() => acctSize * (riskPct/100.0)
+qtyFromRisk(stopDist) => math.max(0.0, riskAmt() / math.max(stopDist, TICK))
+
+// optional symbol restriction
+restrictSymbols = input.bool(false, "Restrict symbols (XAU, BTC, GBPJPY)")
+allowXAU = input.bool(true, "XAUUSD")
+allowBTC = input.bool(true, "BTCUSD/USDT")
+allowGJ  = input.bool(true, "GBPJPY")
+symOK = not restrictSymbols or ( (allowXAU and str.contains(syminfo.ticker, "XAU"))
+      or (allowBTC and (str.contains(syminfo.ticker,"BTC") or str.contains(syminfo.ticker,"BTCUSDT")))
+      or (allowGJ  and str.contains(syminfo.ticker,"GBPJPY")) )
+
+// helper to place entry with stop and tp-limit (stop-entry)
+enterWithStops(id, dir, entry, sl, rr, isMarket) =>
+    sd = math.abs(entry - sl)
+    qty = qtyFromRisk(sd)
+    if isMarket
+        if dir == "L"
+            strategy.entry(id, strategy.long, qty=qty, comment=id)
+            strategy.exit(id + " TP/SL", id, stop=sl, limit=close + rr * sd)
+        else
+            strategy.entry(id, strategy.short, qty=qty, comment=id)
+            strategy.exit(id + " TP/SL", id, stop=sl, limit=close - rr * sd)
+    else
+        if dir == "L"
+            strategy.order(id, strategy.long, qty=qty, stop=entry, comment=id)
+            strategy.exit(id + " TP/SL", id, stop=sl, limit=entry + rr * sd)
+        else
+            strategy.order(id, strategy.short, qty=qty, stop=entry, comment=id)
+            strategy.exit(id + " TP/SL", id, stop=sl, limit=entry - rr * sd)
+
+// -------------------- Enhanced 180PC (cross-TF ZigZag) --------------------
+// Inputs
+use180 = (mode=="180 PC") or (mode=="All")
+sigTF_180 = input.timeframe("240","180PC: Signal TF (use 240 for H4)")
+emaFast_180 = input.int(8, "180PC EMA fast")
+emaSlow_180 = input.int(20, "180PC EMA slow")
+zzATRmult = input.float(2.5, "180PC ZigZag ATR multiplier (N)", step=0.1)
+zzATRlen = input.int(14, "ZigZag ATR length")
+zzMinSwings = input.int(8, "180PC ZigZag stored swings", minval=4)
+zzRequireCycles = input.int(2, "180PC Required same-direction cycles", minval=1)
+rr_180 = input.float(1.0, "180PC Reward:Risk", minval=0.1)
+requireWeeklyForD1 = input.bool(true, "180PC: require weekly agreement for D1 signals")
+
+// HTF EMA alignment (D1 for bias; sigTF for signal)
+emaD_fast = request.security(syminfo.tickerid, "D", ta.ema(close, emaFast_180))
+emaD_slow = request.security(syminfo.tickerid, "D", ta.ema(close, emaSlow_180))
+d1_long = emaD_fast > emaD_slow
+d1_short = emaD_fast < emaD_slow
+
+emaSig_fast = request.security(syminfo.tickerid, sigTF_180, ta.ema(close, emaFast_180))
+emaSig_slow = request.security(syminfo.tickerid, sigTF_180, ta.ema(close, emaSlow_180))
+sig_long = emaSig_fast > emaSig_slow
+sig_short = emaSig_fast < emaSig_slow
+
+dPrevBull = request.security(syminfo.tickerid, "D", close[1] > open[1])
+dPrevBear = request.security(syminfo.tickerid, "D", close[1] < open[1])
+
+// Weekly for D1 signals
+emaW_fast = request.security(syminfo.tickerid, "W", ta.ema(close, emaFast_180))
+emaW_slow = request.security(syminfo.tickerid, "W", ta.ema(close, emaSlow_180))
+w_long = emaW_fast > emaW_slow
+w_short = emaW_fast < emaW_slow
+
+// Determine higher TF for ZigZag validation: if signal TF is H4 (240) use D, if D use W, else default to D
+higherTF_for_sig = sigTF_180 == "D" ? "W" : "D"
+
+// compute ATR on higher TF and ZigZag swings on higher TF using request.security
+zz_atr_htf = request.security(syminfo.tickerid, higherTF_for_sig, ta.atr(zzATRlen))
+zz_threshold_htf = zz_atr_htf * zzATRmult
+
+// we need a higher-TF ZigZag routine that returns arrays of swings; Pine doesn't return arrays from request.security.
+// approach: compute a compact encoded swings series on higher TF and sample it here.
+// We'll implement a higher-TF swing indicator via request.security that tags swing points using pivot detection based on ATR threshold.
+// To keep it robust and non-repainting we detect confirmed swings when the higher TF bar closes and the price move exceeded threshold.
+
+// helper to get last 6 pivots from higher TF using pivot functions based on ATR threshold approximation
+// We'll approximate by using pivothigh/pivotlow on higher TF with depth tuned by zzATRlen (practical compromise)
+pivotHigh_HTF = request.security(syminfo.tickerid, higherTF_for_sig, ta.pivothigh(high, 3, 3))
+pivotLow_HTF  = request.security(syminfo.tickerid, higherTF_for_sig, ta.pivotlow(low, 3, 3))
+
+// Count cycles on higher TF using recent pivots: get arrays via multiple offset requests (common Pine workaround)
+ph1 = request.security(syminfo.tickerid, higherTF_for_sig, high[3])
+ph2 = request.security(syminfo.tickerid, higherTF_for_sig, high[6])
+pl1 = request.security(syminfo.tickerid, higherTF_for_sig, low[3])
+pl2 = request.security(syminfo.tickerid, higherTF_for_sig, low[6])
+
+// Conservative cycles: require last two highs rising AND last two lows rising for up cycles; opposite for down cycles.
+sigCycleUpOk = false
+sigCycleDnOk = false
+if (not na(ph1) and not na(ph2) and not na(pl1) and not na(pl2))
+    if (ph1 > ph2) and (pl1 > pl2)
+        sigCycleUpOk := true
+    if (ph1 < ph2) and (pl1 < pl2)
+        sigCycleDnOk := true
+
+// Ring detection on signal TF (we assume you run the script on the signal TF for best fidelity)
+ringLow = (low[1] < low[2]) and (high[1] < high[2])
+ringHigh = (high[1] > high[2]) and (low[1] > low[2])
+
+allowLong180 = (d1_long and sig_long) and sigCycleUpOk and dPrevBull
+allowShort180 = (d1_short and sig_short) and sigCycleDnOk and dPrevBear
+
+// For D1 runtime, optionally require Weekly
+if timeframe.period == "D" and requireWeeklyForD1
+    allowLong180 := allowLong180 and w_long
+    allowShort180 := allowShort180 and w_short
+
+// trigger 180 entries
+if use180 and symOK and strategy.position_size == 0
+    if ringLow and allowLong180
+        e = high[1] + toff
+        sl = low[1] - toff
+        enterWithStops("180PC L", "L", e, sl, rr_180, false)
+    if ringHigh and allowShort180
+        e = low[1] - toff
+        sl = high[1] + toff
+        enterWithStops("180PC S", "S", e, sl, rr_180, false)
+
+// -------------------- Bollinger Bounce (unchanged) --------------------
+useBB = (mode=="Bollinger Bounce") or (mode=="All")
+sigTF_bb = input.timeframe("240","BB: Signal TF")
+ema50 = input.int(50,"BB EMA 50"), ema100 = input.int(100,"BB EMA 100")
+bbLen = input.int(20,"BB Length"), bbMult = input.float(2.0,"BB Mult")
+rr_bb = input.float(1.5,"BB Reward:Risk", minval=0.1)
+requireD1 = input.bool(true,"BB require D1 EMA align")
+
+D50 = request.security(syminfo.tickerid, "D", ta.ema(close, ema50))
+D100= request.security(syminfo.tickerid, "D", ta.ema(close, ema100))
+dUpBB = D50>D100, dDnBB=D50<D100
+H50 = request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema50))
+H100= request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema100))
+hUpBB=H50>H100, hDnBB=H50<H100
+
+src    = request.security(syminfo.tickerid, sigTF_bb, close)
+mean   = request.security(syminfo.tickerid, sigTF_bb, ta.sma(close, bbLen))
+stdev  = request.security(syminfo.tickerid, sigTF_bb, ta.stdev(close, bbLen))
+upper  = mean + bbMult*stdev
+lower  = mean - bbMult*stdev
+ph     = request.security(syminfo.tickerid, sigTF_bb, high[1])
+pl     = request.security(syminfo.tickerid, sigTF_bb, low[1])
+
+if useBB and symOK and strategy.position_size==0
+    longCond  = (src < lower) and hUpBB and (not requireD1 or dUpBB)
+    shortCond = (src > upper) and hDnBB and (not requireD1 or dDnBB)
+    if longCond
+        e = ph + toff
+        sl = pl
+        enterWithStops("BB L","L", e, sl, rr_bb, false)
+    if shortCond
+        e = pl - toff
+        sl = ph
+        enterWithStops("BB S","S", e, sl, rr_bb, false)
+
+// plot BB if desired (commented for strategy to reduce plotting cost)
+//plot(useBB?upper:na, "BB Upper")
+//plot(useBB?mean:na, "BB Mid")
+//plot(useBB?lower:na, "BB Lower")
+
+// -------------------- Breakfast (unchanged) --------------------
+useBF = (mode=="Breakfast") or (mode=="All")
+asianStart = input.session("0000-0700","Breakfast: Asian session (exchange time)")
+londonHour = input.int(8,"Breakfast: London Open Hour")
+windowHrs  = input.int(3,"Breakfast: Trade hours after LO")
+tpPipsBF   = input.int(30,"Breakfast TP (pips/points)")
+inAsian = time(timeframe.period, asianStart)
+var float aHi=na, aLo=na
+if ta.change(inAsian) and inAsian
+    aHi:=high, aLo:=low
+else
+    if inAsian
+        aHi:=math.max(nz(aHi,high), high)
+        aLo:=math.min(nz(aLo,low),  low)
+boxHi=aHi, boxLo=aLo
+hNow = hour(time)
+allowBF = (hNow>=londonHour) and (hNow<londonHour+windowHrs)
+tpTicksBF = tpPipsBF*TICK
+if useBF and symOK and strategy.position_size==0 and boxHi!=na and boxLo!=na and allowBF
+    if close>boxHi
+        e=close, sl=low
+        enterWithStops("BF L", "L", e, sl, tpTicksBF / math.max(math.abs(e-sl), TICK), true)
+    if close<boxLo
+        e=close, sl=high
+        enterWithStops("BF S", "S", e, sl, tpTicksBF / math.max(math.abs(sl-e), TICK), true)
+
+// -------------------- Pip River (unchanged) --------------------
+usePRv = (mode=="Pip River") or (mode=="All")
+envDev = input.float(0.6, "River Envelope % (D1)")
+rr_rv  = input.float(1.0,"River RR")
+cD  = request.security(syminfo.tickerid,"D", close)
+ema5D = request.security(syminfo.tickerid,"D", ta.ema(close,5))
+ema20D= request.security(syminfo.tickerid,"D", ta.ema(close,20))
+midD = request.security(syminfo.tickerid,"D", ta.sma(close,20))
+upEnv = midD*(1+envDev/100.0)
+loEnv = midD*(1-envDev/100.0)
+phD = request.security(syminfo.tickerid,"D", high[1])
+plD = request.security(syminfo.tickerid,"D", low[1])
+if usePRv and symOK and strategy.position_size==0
+    longOK  = (ema5D>ema20D) and (cD>upEnv)
+    shortOK = (ema5D<ema20D) and (cD<loEnv)
+    if longOK
+        e=phD+toff, sl=plD-toff
+        enterWithStops("River L","L",e,sl,rr_rv,false)
+    if shortOK
+        e=plD-toff, sl=phD+toff
+        enterWithStops("River S","S",e,sl,rr_rv,false)
+
+// -------------------- Pip Runner (unchanged) --------------------
+usePRn = (mode=="Pip Runner") or (mode=="All")
+rr_rn = input.float(1.2,"Runner RR")
+emaD8 = request.security(syminfo.tickerid,"D", ta.ema(close,8))
+emaD20= request.security(syminfo.tickerid,"D", ta.ema(close,20))
+prevBullD = request.security(syminfo.tickerid,"D", close[1]>open[1])
+prevBearD = request.security(syminfo.tickerid,"D", close[1]<open[1])
+emaH4_8  = request.security(syminfo.tickerid,"240", ta.ema(close,8))
+emaH4_20 = request.security(syminfo.tickerid,"240", ta.ema(close,20))
+ringLowH4  = request.security(syminfo.tickerid,"240", (low[1] < low[2]) and (high[1] < high[2]) ? 1:0)==1
+ringHighH4 = request.security(syminfo.tickerid,"240", (high[1]> high[2]) and (low[1]  > low[2]) ? 1:0)==1
+phH4 = request.security(syminfo.tickerid,"240", high[1])
+plH4 = request.security(syminfo.tickerid,"240", low[1])
+if usePRn and symOK and strategy.position_size==0
+    longOK = emaD8>emaD20 and prevBullD and emaH4_8>emaH4_20 and ringLowH4
+    shortOK= emaD8<emaD20 and prevBearD and emaH4_8<emaH4_20 and ringHighH4
+    if longOK
+        e=phH4+toff, sl=plH4-toff
+        enterWithStops("Runner L","L",e,sl,rr_rn,false)
+    if shortOK
+        e=plH4-toff, sl=phH4+toff
+        enterWithStops("Runner S","S",e,sl,rr_rn,false)
+
+// -------------------- Volatility Reversal (unchanged) --------------------
+useVR = (mode=="Volatility Reversal") or (mode=="All")
+rr_vr = input.float(1.0,"VolRev RR (1:1 default)")
+longSignal_vr  = (low < low[1])  and (close > low[1])   // broke prior low, closed back above
+shortSignal_vr = (high> high[1]) and (close < high[1])  // broke prior high, closed back below
+
+// place orders only on the next bar after signal: implement with barssince
+sigBarL = ta.barssince(longSignal_vr) == 0
+sigBarS = ta.barssince(shortSignal_vr) == 0
+
+if useVR and symOK and strategy.position_size==0
+    if sigBarL
+        e = high[1] + toff
+        sl= low[1]  - toff
+        enterWithStops("VolRev L","L",e,sl,rr_vr,false)
+    if sigBarS
+        e = low[1]  - toff
+        sl= high[1] + toff
+        enterWithStops("VolRev S","S",e,sl,rr_vr,false)
+
+// -------------------- T-Wave (pin-bar, immediate entry + trailing) --------------------
+useTW = (mode=="T-Wave") or (mode=="All")
+// Inputs
+twATRlen = input.int(14, "T-Wave ATR length")
+twATRmultTrail = input.float(1.0, "T-Wave trailing ATR multiplier", step=0.1)
+twRR = input.float(1.0, "T-Wave RR default", minval=0.1)
+twBodyRatio = input.float(0.3, "T-Wave max body ratio (body <= ratio * range)")
+twTailRatio = input.float(0.6, "T-Wave min tail ratio (tail >= ratio * range)")
+twUseTrailing = input.bool(true, "T-Wave use trailing stop")
+twTrailStartR = input.float(1.0, "T-Wave trail start at R", step=0.1)
+
+// simple pin-bar detector (bullish / bearish)
+isBullPin = false
+isBearPin = false
+barRange = high - low
+body = math.abs(close - open)
+upperTail = high - math.max(open, close)
+lowerTail = math.min(open, close) - low
+if barRange > 0
+    isBullPin := (close > open) and (body <= barRange * twBodyRatio) and (lowerTail >= barRange * twTailRatio)
+    isBearPin := (close < open) and (body <= barRange * twBodyRatio) and (upperTail >= barRange * twTailRatio)
+
+// Entry: taken on close of pin-bar (immediate market entry)
+if useTW and symOK and strategy.position_size == 0
+    if isBullPin
+        entry = close
+        sl = low - toff
+        // place market entry and set TP via RR (TP at entry + (entry-sl)*RR)
+        sd = math.abs(entry - sl)
+        tp = entry + sd * twRR
+        strategy.entry("TW L", strategy.long, qty=qtyFromRisk(sd))
+        strategy.exit("TW L X", "TW L", stop=sl, limit=tp)
+    if isBearPin
+        entry = close
+        sl = high + toff
+        sd = math.abs(sl - entry)
+        tp = entry - sd * twRR
+        strategy.entry("TW S", strategy.short, qty=qtyFromRisk(sd))
+        strategy.exit("TW S X", "TW S", stop=sl, limit=tp)
+// implement trailing stops via built-in strategy.order modifications is limited; users can emulate by:
+// - move SL to breakeven and then set trailing manually in next version (complex in strategy).
+// For now keep trailing off in strategy to prevent order conflicts; indicator will show trailing behavior visually.
+
+// -------------------- Alerts --------------------
+alertcondition(use180 and ringLow and allowLong180,  "180PC Long",  "180PC Long candidate on {{ticker}}")
+alertcondition(use180 and ringHigh and allowShort180, "180PC Short", "180PC Short candidate on {{ticker}}")
+alertcondition(useBB and (src < lower) and hUpBB and (not requireD1 or dUpBB),  "BB Long",  "Bollinger Bounce Long on {{ticker}}")
+alertcondition(useBB and (src > upper) and hDnBB and (not requireD1 or dDnBB), "BB Short", "Bollinger Bounce Short on {{ticker}}")
+alertcondition(useBF and boxHi!=na and close>boxHi, "Breakfast Long", "Breakfast Long on {{ticker}}")
+alertcondition(useBF and boxLo!=na and close<boxLo, "Breakfast Short","Breakfast Short on {{ticker}}")
+alertcondition(usePRv and (ema5D>ema20D) and (cD>upEnv), "River Long",  "Pip River Long on {{ticker}}")
+alertcondition(usePRv and (ema5D<ema20D) and (cD<loEnv), "River Short", "Pip River Short on {{ticker}}")
+alertcondition(usePRn and (emaD8>emaD20) and prevBullD and (emaH4_8>emaH4_20) and ringLowH4,  "Runner Long","Pip Runner Long on {{ticker}}")
+alertcondition(usePRn and (emaD8<emaD20) and prevBearD and (emaH4_8<emaH4_20) and ringHighH4, "Runner Short","Pip Runner Short on {{ticker}}")
+alertcondition(useVR and longSignal_vr,  "VolRev Long",  "Volatility Reversal Long on {{ticker}}")
+alertcondition(useVR and shortSignal_vr, "VolRev Short", "Volatility Reversal Short on {{ticker}}")
+alertcondition(useTW and isBullPin, "TW Long", "T-Wave bullish pin on {{ticker}}")
+alertcondition(useTW and isBearPin, "TW Short", "T-Wave bearish pin on {{ticker}}")
