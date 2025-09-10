@@ -1,0 +1,208 @@
+//@version=5
+indicator("GSecker Master Indicator — 6-in-1 w/ SL/TP visuals",
+  overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ===== Selector & shared inputs =====
+mode = input.string("All", "Strategy Selector",
+     options=["180 PC","Bollinger Bounce","Breakfast","Pip River","Pip Runner","Volatility Reversal","All"])
+offsetPips = input.float(1.0, "Entry offset (pips/points)", step=0.1)
+toff = offsetPips * syminfo.mintick
+
+// Small helpers
+plotSignalArrow(isLong, price, txt) =>
+    dir = isLong ? location.belowbar : location.abovebar
+    plotshape(true, style=shape.triangleup, location=dir, offset=0,
+              color=color.new(color.blue, 0), size=size.tiny, text=txt, textcolor=color.white)
+plotDot(price, col) => plot(price, style=plot.style_circles, color=col, linewidth=2, offset=0)
+newLine(y, txt) =>
+    l = line.new(bar_index, y, bar_index+1, y, extend=extend.right, color=color.new(color.blue,0), width=1)
+    label.new(bar_index, y, txt, style=label.style_none, textcolor=color.new(color.blue,60)), l
+
+// --- storage vars (optional) ---
+var label[] sigLabels = array.new_label()
+var line[]  sigLines  = array.new_line()
+
+// ===== 180 PC =====
+use180 = (mode=="180 PC") or (mode=="All")
+emaFast_180 = input.int(8,  "180PC EMA Fast")
+emaSlow_180 = input.int(20, "180PC EMA Slow")
+minCyclesH4 = input.int(2,  "180PC H4 min cycles")
+rr_180      = input.float(1.0,"180PC RR", minval=0.1)
+
+emaD_f = request.security(syminfo.tickerid,"D", ta.ema(close, emaFast_180))
+emaD_s = request.security(syminfo.tickerid,"D", ta.ema(close, emaSlow_180))
+dUp = emaD_f>emaD_s, dDn = emaD_f<emaD_s
+emaH4_f = request.security(syminfo.tickerid,"240", ta.ema(close, emaFast_180))
+emaH4_s = request.security(syminfo.tickerid,"240", ta.ema(close, emaSlow_180))
+hUp = emaH4_f>emaH4_s, hDn = emaH4_f<emaH4_s
+hUpOk = hUp and ta.barssince(not hUp) >= minCyclesH4-1
+hDnOk = hDn and ta.barssince(not hDn) >= minCyclesH4-1
+ringLow  = (low[1] < low[2]) and (high[1] < high[2])
+ringHigh = (high[1]> high[2]) and (low[1]  > low[2])
+
+if use180
+    if ringLow and dUp and hUpOk
+        entry = high[1] + toff, sl = low[1] - toff, tp = entry + (entry-sl)
+        plotSignalArrow(true, low, "180")
+        plotDot(sl, color.red), plotDot(tp, color.green)
+        label.new(bar_index, entry, "", style=label.style_none)
+        _, l1 = newLine(entry, ""), _, l2 = newLine(sl,""), _, l3 = newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if ringHigh and dDn and hDnOk
+        entry = low[1] - toff, sl = high[1] + toff, tp = entry - (sl-entry)
+        plotSignalArrow(false, high, "180")
+        plotDot(sl, color.red), plotDot(tp, color.green)
+        _, l1 = newLine(entry, ""), _, l2 = newLine(sl,""), _, l3 = newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Bollinger Bounce =====
+useBB = (mode=="Bollinger Bounce") or (mode=="All")
+ema50 = input.int(50,"BB EMA 50"), ema100 = input.int(100,"BB EMA 100")
+bbLen = input.int(20,"BB Length"), bbMult = input.float(2.0,"BB Mult")
+requireD1 = input.bool(true,"BB require D1 EMA align")
+rr_bb = input.float(1.5,"BB RR", minval=0.1)
+
+D50 = request.security(syminfo.tickerid, "D", ta.ema(close, ema50))
+D100= request.security(syminfo.tickerid, "D", ta.ema(close, ema100))
+dUpBB=D50>D100, dDnBB=D50<D100
+H50 = request.security(syminfo.tickerid,"240", ta.ema(close, ema50))
+H100= request.security(syminfo.tickerid,"240", ta.ema(close, ema100))
+hUpBB=H50>H100, hDnBB=H50<H100
+mean   = request.security(syminfo.tickerid,"240", ta.sma(close, bbLen))
+stdev  = request.security(syminfo.tickerid,"240", ta.stdev(close, bbLen))
+upper  = mean + bbMult*stdev
+lower  = mean - bbMult*stdev
+plot(useBB?upper:na,"BB Upper",1), plot(useBB?mean:na,"BB Mid",1), plot(useBB?lower:na,"BB Lower",1)
+
+if useBB
+    longC  = close<lower and hUpBB and (not requireD1 or dUpBB)
+    shortC = close>upper and hDnBB and (not requireD1 or dDnBB)
+    if longC
+        e=high[1]+toff, sl=low[1], sd=math.abs(e-sl), tp=e+sd*rr_bb
+        plotSignalArrow(true, low, "BB")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if shortC
+        e=low[1]-toff, sl=high[1], sd=math.abs(sl-e), tp=e-sd*rr_bb
+        plotSignalArrow(false, high, "BB")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Breakfast (Asian box) =====
+useBF = (mode=="Breakfast") or (mode=="All")
+asianSess = input.session("0000-0700","Breakfast: Asian session")
+londonHour = input.int(8,"London Open Hour")
+windowHrs  = input.int(3,"Trade hours after LO")
+tpPipsBF   = input.int(30,"TP (pips/points)")
+inAsian = time(timeframe.period, asianSess)
+var float aHi=na, aLo=na
+if ta.change(inAsian) and inAsian
+    aHi:=high, aLo:=low
+else
+    if inAsian
+        aHi:=math.max(nz(aHi,high), high)
+        aLo:=math.min(nz(aLo,low),  low)
+plot(useBF and aHi!=na?aHi:na,"Asian High", color=color.orange)
+plot(useBF and aLo!=na?aLo:na,"Asian Low",  color=color.orange)
+allowBF = (hour(time)>=londonHour) and (hour(time)<londonHour+windowHrs)
+if useBF and aHi!=na and aLo!=na and allowBF
+    if close>aHi
+        e=close, sl=low, tp=e+tpPipsBF*syminfo.mintick
+        plotSignalArrow(true, low, "BF")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if close<aLo
+        e=close, sl=high, tp=e-tpPipsBF*syminfo.mintick
+        plotSignalArrow(false, high, "BF")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Pip River (D1 5/20 EMA + envelopes) =====
+usePRv = (mode=="Pip River") or (mode=="All")
+envDev = input.float(0.6,"River Envelope %")
+rr_rv  = input.float(1.0,"River RR")
+cD  = request.security(syminfo.tickerid,"D", close)
+ema5D = request.security(syminfo.tickerid,"D", ta.ema(close,5))
+ema20D= request.security(syminfo.tickerid,"D", ta.ema(close,20))
+midD = request.security(syminfo.tickerid,"D", ta.sma(close,20))
+upEnv = midD*(1+envDev/100.0)
+loEnv = midD*(1-envDev/100.0)
+phD = request.security(syminfo.tickerid,"D", high[1])
+plD = request.security(syminfo.tickerid,"D", low[1])
+plot(usePRv?upEnv:na,"River Upper Env"), plot(usePRv?loEnv:na,"River Lower Env")
+if usePRv
+    if (ema5D>ema20D) and (cD>upEnv)
+        e=phD+toff, sl=plD-toff, tp=e+(e-sl)*rr_rv
+        plotSignalArrow(true, low, "Rv")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if (ema5D<ema20D) and (cD<loEnv)
+        e=plD-toff, sl=phD+toff, tp=e-(sl-e)*rr_rv
+        plotSignalArrow(false, high, "Rv")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Pip Runner (trend filters + H4 ring) =====
+usePRn = (mode=="Pip Runner") or (mode=="All")
+rr_rn = input.float(1.2,"Runner RR")
+emaD8 = request.security(syminfo.tickerid,"D", ta.ema(close,8))
+emaD20= request.security(syminfo.tickerid,"D", ta.ema(close,20))
+prevBullD = request.security(syminfo.tickerid,"D", close[1]>open[1])
+prevBearD = request.security(syminfo.tickerid,"D", close[1]<open[1])
+emaH4_8  = request.security(syminfo.tickerid,"240", ta.ema(close,8))
+emaH4_20 = request.security(syminfo.tickerid,"240", ta.ema(close,20))
+ringLowH4  = request.security(syminfo.tickerid,"240", (low[1]<low[2]) and (high[1]<high[2]) ? 1:0)==1
+ringHighH4 = request.security(syminfo.tickerid,"240", (high[1]>high[2]) and (low[1]>low[2]) ? 1:0)==1
+if usePRn
+    if (emaD8>emaD20) and prevBullD and (emaH4_8>emaH4_20) and ringLowH4
+        e=high[1]+toff, sl=low[1]-toff, tp=e+(e-sl)*rr_rn
+        plotSignalArrow(true, low, "Rn")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if (emaD8<emaD20) and prevBearD and (emaH4_8<emaH4_20) and ringHighH4
+        e=low[1]-toff, sl=high[1]+toff, tp=e-(sl-e)*rr_rn
+        plotSignalArrow(false, high, "Rn")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Volatility Reversal (false-break prev bar, 1-bar idea visually) =====
+useVR = (mode=="Volatility Reversal") or (mode=="All")
+rr_vr = input.float(1.0,"VolRev RR")
+longSignal  = (low < low[1])  and (close > low[1])
+shortSignal = (high> high[1]) and (close < high[1])
+
+if useVR
+    if longSignal
+        e=high[1]+toff, sl=low[1]-toff, tp=e+(e-sl)*rr_vr
+        plotSignalArrow(true, low, "VR")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+    if shortSignal
+        e=low[1]-toff, sl=high[1]+toff, tp=e-(sl-e)*rr_vr
+        plotSignalArrow(false, high, "VR")
+        plotDot(sl,color.red), plotDot(tp,color.green)
+        _,l1=newLine(e,""), _,l2=newLine(sl,""), _,l3=newLine(tp,"")
+        array.push(sigLines,l1), array.push(sigLines,l2), array.push(sigLines,l3)
+
+// ===== Alerts =====
+alertcondition(use180 and ringLow and dUp and hUpOk,  "180PC Long",  "180PC Long candidate on {{ticker}}")
+alertcondition(use180 and ringHigh and dDn and hDnOk, "180PC Short", "180PC Short candidate on {{ticker}}")
+alertcondition(useBB and close<lower and hUpBB and (not requireD1 or dUpBB),  "BB Long",  "Bollinger Bounce Long on {{ticker}}")
+alertcondition(useBB and close>upper and hDnBB and (not requireD1 or dDnBB), "BB Short", "Bollinger Bounce Short on {{ticker}}")
+alertcondition(useBF and aHi!=na and close>aHi, "Breakfast Long",  "Breakfast Long on {{ticker}}")
+alertcondition(useBF and aLo!=na and close<aLo, "Breakfast Short", "Breakfast Short on {{ticker}}")
+alertcondition(usePRv and (ema5D>ema20D) and (cD>upEnv), "River Long",  "Pip River Long on {{ticker}}")
+alertcondition(usePRv and (ema5D<ema20D) and (cD<loEnv), "River Short", "Pip River Short on {{ticker}}")
+alertcondition(usePRn and (emaD8>emaD20) and prevBullD and (emaH4_8>emaH4_20) and ringLowH4,  "Runner Long","Pip Runner Long on {{ticker}}")
+alertcondition(usePRn and (emaD8<emaD20) and prevBearD and (emaH4_8<emaH4_20) and ringHighH4, "Runner Short","Pip Runner Short on {{ticker}}")
+alertcondition(useVR and longSignal,  "VolRev Long",  "Volatility Reversal Long on {{ticker}}")
+alertcondition(useVR and shortSignal, "VolRev Short", "Volatility Reversal Short on {{ticker}}")
