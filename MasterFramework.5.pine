@@ -1,0 +1,281 @@
+//@version=5
+strategy("GSecker Master Framework — Selector (180PC / Bollinger / Breakfast)",
+  overlay=true,
+  calc_on_order_fills=true,
+  calc_on_every_tick=true,
+  initial_capital=10000,
+  default_qty_type=strategy.fixed,
+  process_orders_on_close=true,
+  commission_type=strategy.commission.percent,
+  commission_value=0.0)
+
+// =====================
+// ====== Selector =====
+// =====================
+mode = input.string(title="Strategy Selector", defval="180 PC", options=["180 PC","Bollinger Bounce","Breakfast","All"], tooltip="Choose one strategy or All to run together")
+
+// Global sizing defaults (shared)
+acctSize = input.float(10000, "Account Size (for sizing)", step=1)
+riskPct  = input.float(1.0, "Risk % per Trade", minval=0.01, step=0.01)
+
+// Symbol restriction (optional)
+restrictSymbols = input.bool(false, "Restrict symbols to XAU/BTC/GBPJPY")
+allowXAU = input.bool(true, "XAUUSD")
+allowBTC = input.bool(true, "BTCUSD/USDT")
+allowGJ  = input.bool(true, "GBPJPY")
+
+symOK = not restrictSymbols or ( (allowXAU and str.contains(syminfo.ticker, "XAU")) or (allowBTC and (str.contains(syminfo.ticker, "BTC") or str.contains(syminfo.ticker, "BTCUSDT"))) or (allowGJ and str.contains(syminfo.ticker, "GBPJPY")) )
+
+// Convenient function for qty calc (price-dist in price units)
+f_qty_from_risk(_riskAmount, _stopDist) =>
+    tick = syminfo.mintick
+    math.max(0.0, _riskAmount / math.max(_stopDist, tick))
+
+// ======================================================
+// ============== Strategy: 180 PC (ring high/low) =======
+// ======================================================
+// Assumptions (same as individual script):
+// - Uses EMA HTF confirmation (D1 + H4 by default)
+// - Ring detection on chosen signal TF (default H4). Ring low = prior bar has lower low & lower high than previous.
+// - Entry: stop order 1 * mintick above/below prev bar high/low
+// - SL = prev bar low/high. TP = RR * stopDist
+// - Uses risk% position sizing (account * riskPct)
+
+use180 = (mode == "180 PC") or (mode == "All")
+sigTF_180 = input.timeframe("240", "180PC: Signal TF (ring pattern TF)")
+emaFast_180 = input.int(8, "180PC EMA Fast", group="180PC")
+emaSlow_180 = input.int(20, "180PC EMA Slow", group="180PC")
+minCyclesH4 = input.int(2, "180PC: H4 minimum cycles", group="180PC")
+entryOffsetPts_180 = input.float(1.0, "180PC Entry Offset (points)", group="180PC")
+rr_180 = input.float(1.0, "180PC Reward:Risk", minval=0.1, group="180PC")
+
+// HTF EMAs
+emaD_fast_180 = request.security(syminfo.tickerid, "D", ta.ema(close, emaFast_180))
+emaD_slow_180 = request.security(syminfo.tickerid, "D", ta.ema(close, emaSlow_180))
+d1_up_180 = emaD_fast_180 > emaD_slow_180
+d1_down_180 = emaD_fast_180 < emaD_slow_180
+
+emaH4_fast_180 = request.security(syminfo.tickerid, "240", ta.ema(close, emaFast_180))
+emaH4_slow_180 = request.security(syminfo.tickerid, "240", ta.ema(close, emaSlow_180))
+h4_dir_up = emaH4_fast_180 > emaH4_slow_180
+h4_dir_down = emaH4_fast_180 < emaH4_slow_180
+
+// approximate "min cycles" by barssince on sampled series (conservative)
+h4_up_count = ta.barssince(not h4_dir_up)
+h4_down_count = ta.barssince(not h4_dir_down)
+h4_up_ok = h4_dir_up and (h4_up_count >= minCyclesH4 - 1)
+h4_down_ok = h4_dir_down and (h4_down_count >= minCyclesH4 - 1)
+
+// Ring detection: prefer running on signal TF; if chart TF == sigTF detections are local (more accurate)
+isSignalTF_180 = timeframe.period == sigTF_180
+ringLow_local = (low[1] < low[2]) and (high[1] < high[2])
+ringHigh_local = (high[1] > high[2]) and (low[1] > low[2])
+
+// If chart TF != sigTF, use a conservative ring detection on current TF (looser).
+ringLow_180 = isSignalTF_180 ? ringLow_local : ((low[1] < low[2]) and (high[1] < high[2]))
+ringHigh_180 = isSignalTF_180 ? ringHigh_local : ((high[1] > high[2]) and (low[1] > low[2]))
+
+offset_180 = entryOffsetPts_180 * syminfo.mintick
+longEntryPrice_180 = high[1] + offset_180
+shortEntryPrice_180 = low[1] - offset_180
+longSL_180 = low[1] - offset_180
+shortSL_180 = high[1] + offset_180
+
+riskAmt = acctSize * (riskPct / 100.0)
+longStopDist_180 = math.abs(longEntryPrice_180 - longSL_180)
+shortStopDist_180 = math.abs(shortSL_180 - shortEntryPrice_180)
+longQty_180 = f_qty_from_risk(riskAmt, longStopDist_180)
+shortQty_180 = f_qty_from_risk(riskAmt, shortStopDist_180)
+
+longHTFok_180 = d1_up_180 and h4_up_ok
+shortHTFok_180 = d1_down_180 and h4_down_ok
+
+canLong_180 = use180 and symOK and ringLow_180 and longHTFok_180 and strategy.position_size == 0
+canShort_180 = use180 and symOK and ringHigh_180 and shortHTFok_180 and strategy.position_size == 0
+
+if canLong_180
+    strategy.order("180PC Long Stop", strategy.long, qty=longQty_180, stop=longEntryPrice_180, comment="180PC Long")
+    tpL = longEntryPrice_180 + rr_180 * longStopDist_180
+    strategy.exit("180PC L Exit", "180PC Long Stop", stop=longSL_180, limit=tpL)
+if canShort_180
+    strategy.order("180PC Short Stop", strategy.short, qty=shortQty_180 := shortQty_180, stop=shortEntryPrice_180, comment="180PC Short")
+    tpS = shortEntryPrice_180 - rr_180 * shortStopDist_180
+    strategy.exit("180PC S Exit", "180PC Short Stop", stop=shortSL_180, limit=tpS)
+
+// Plotting markers for 180PC
+plotshape(use180 and ringLow_180 ? low : na, title="180PC RingLow", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+plotshape(use180 and ringHigh_180 ? high : na, title="180PC RingHigh", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+alertcondition(ringLow_180 and longHTFok_180 and symOK, title="180PC Long Signal", message="180PC Long candidate on {{ticker}}")
+alertcondition(ringHigh_180 and shortHTFok_180 and symOK, title="180PC Short Signal", message="180PC Short candidate on {{ticker}}")
+
+// ======================================================
+// ========== Strategy: Bollinger Bounce =================
+// ======================================================
+// Assumptions:
+// - H4 signal with optional D1 EMA confirmation
+// - Uses EMA50/EMA100 alignment and Bollinger Bands on H4 (configurable)
+// - Entry mode: immediate on_close or stop above prev candle high/low
+// - SL uses previous candle low/high on signal TF
+// - Risk sizing uses risk% per trade
+
+useBB = (mode == "Bollinger Bounce") or (mode == "All")
+sigTF_bb = input.timeframe("240", "BB: Signal TF (H4)")
+ema50_bb = input.int(50, "BB EMA 50", group="Bollinger")
+ema100_bb = input.int(100, "BB EMA 100", group="Bollinger")
+bbLen = input.int(20, "BB Length", group="Bollinger")
+bbMult = input.float(2.0, "BB Multiplier", group="Bollinger")
+requireD1_bb = input.bool(true, "Require Daily EMA alignment", group="Bollinger")
+entryMode_bb = input.string("on_close", "Entry Mode", options=["on_close","stop_above_prev"], group="Bollinger")
+entryOffsetPts_bb = input.float(1.0, "BB Entry Offset (points)", group="Bollinger")
+rr_bb = input.float(1.5, "BB Reward:Risk (TP)", group="Bollinger")
+
+emaD50_bb = request.security(syminfo.tickerid, "D", ta.ema(close, ema50_bb))
+emaD100_bb = request.security(syminfo.tickerid, "D", ta.ema(close, ema100_bb))
+d1_up_bb = emaD50_bb > emaD100_bb
+d1_down_bb = emaD50_bb < emaD100_bb
+
+emaH4_50_bb = request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema50_bb))
+emaH4_100_bb = request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema100_bb))
+h4_up_bb = emaH4_50_bb > emaH4_100_bb
+h4_down_bb = emaH4_50_bb < emaH4_100_bb
+
+// Bollinger on signal TF
+bb_mean = request.security(syminfo.tickerid, sigTF_bb, ta.sma(close, bbLen))
+bb_std = request.security(syminfo.tickerid, sigTF_bb, ta.stdev(close, bbLen))
+bb_upper = bb_mean + bbMult * bb_std
+bb_lower = bb_mean - bbMult * bb_std
+
+close_sig = request.security(syminfo.tickerid, sigTF_bb, close)
+high_sig  = request.security(syminfo.tickerid, sigTF_bb, high)
+low_sig   = request.security(syminfo.tickerid, sigTF_bb, low)
+prev_high_sig = request.security(syminfo.tickerid, sigTF_bb, high[1])
+prev_low_sig  = request.security(syminfo.tickerid, sigTF_bb, low[1])
+
+offset_bb = entryOffsetPts_bb * syminfo.mintick
+
+long_cond_bb = (close_sig < bb_lower) and h4_up_bb and (not requireD1_bb or d1_up_bb)
+short_cond_bb = (close_sig > bb_upper) and h4_down_bb and (not requireD1_bb or d1_down_bb)
+
+longEntryPrice_bb = entryMode_bb == "stop_above_prev" ? (prev_high_sig + offset_bb) : close_sig
+longSL_bb = prev_low_sig
+shortEntryPrice_bb = entryMode_bb == "stop_above_prev" ? (prev_low_sig - offset_bb) : close_sig
+shortSL_bb = prev_high_sig
+
+longStopDist_bb = math.abs(longEntryPrice_bb - longSL_bb)
+shortStopDist_bb = math.abs(shortSL_bb - shortEntryPrice_bb)
+longQty_bb = f_qty_from_risk(riskAmt, longStopDist_bb)
+shortQty_bb = f_qty_from_risk(riskAmt, shortStopDist_bb)
+
+if useBB and symOK and long_cond_bb and strategy.position_size == 0
+    if entryMode_bb == "stop_above_prev"
+        strategy.order("BB Long Stop", strategy.long, qty=longQty_bb, stop=longEntryPrice_bb, comment="BB Long")
+        tp_bb = longEntryPrice_bb + rr_bb * longStopDist_bb
+        strategy.exit("BB L Exit", "BB Long Stop", stop=longSL_bb, limit=tp_bb)
+    else
+        strategy.entry("BB Long", strategy.long, qty=longQty_bb)
+        tp_bb = close_sig + rr_bb * longStopDist_bb
+        strategy.exit("BB L Exit", "BB Long", stop=longSL_bb, limit=tp_bb)
+
+if useBB and symOK and short_cond_bb and strategy.position_size == 0
+    if entryMode_bb == "stop_above_prev"
+        strategy.order("BB Short Stop", strategy.short, qty=shortQty_bb, stop=shortEntryPrice_bb, comment="BB Short")
+        tpS_bb = shortEntryPrice_bb - rr_bb * shortStopDist_bb
+        strategy.exit("BB S Exit", "BB Short Stop", stop=shortSL_bb, limit=tpS_bb)
+    else
+        strategy.entry("BB Short", strategy.short, qty=shortQty_bb)
+        tpS_bb = close_sig - rr_bb * shortStopDist_bb
+        strategy.exit("BB S Exit", "BB Short", stop=shortSL_bb, limit=tpS_bb)
+
+// Plot BB bands (from signal TF projected to chart)
+plot(useBB ? bb_upper : na, title="BB Upper (sigTF)", linewidth=1)
+plot(useBB ? bb_mean  : na, title="BB Mean (sigTF)", linewidth=1)
+plot(useBB ? bb_lower : na, title="BB Lower (sigTF)", linewidth=1)
+
+alertcondition(long_cond_bb and symOK, title="BB Long Signal", message="Bollinger Bounce Long candidate on {{ticker}}")
+alertcondition(short_cond_bb and symOK, title="BB Short Signal", message="Bollinger Bounce Short candidate on {{ticker}}")
+
+// ======================================================
+// ========== Strategy: Breakfast (Asian Box Breakout) ==
+// ======================================================
+// Assumptions:
+// - 15m TF breakout of Asian box (user-configurable times)
+// - Entry on close beyond box high/low (or market entry same candle); SL = breakout candle low/high
+// - TP by fixed points (pips), configurable
+// - Restrict to first hours of London session optionally
+
+useBreakfast = (mode == "Breakfast") or (mode == "All")
+chartTF = input.timeframe("15", "Breakfast: chart timeframe (should be 15m)", group="Breakfast")
+asianStart = input.time("00:00", "Asian Start (exchange time)", group="Breakfast")
+asianEnd   = input.time("07:00", "Asian End (exchange time)", group="Breakfast")
+londonHour = input.int(8, "London Open Hour (0-23)", group="Breakfast")
+tradeWindowHours = input.int(3, "Hours after London Open to allow trades", group="Breakfast")
+tpPoints = input.int(30, "Breakfast TP (points/pips)", group="Breakfast")
+tpIsPips = input.bool(true, "TP input is in pips (convert using mintick)", group="Breakfast")
+entryOffsetPts_bf = input.float(0.0, "Breakfast Entry Offset pts", group="Breakfast")
+
+// Build Asian box (for the day) — simple implementation: accumulate high/low while inside Asian session
+isInAsian = time(timeframe.period, str.tostring(asianStart) + "-" + str.tostring(asianEnd))
+var float asianHigh = na
+var float asianLow = na
+// Reset logic: when session starts for a new day we set initial high/low
+if (isInAsian and na(asianHigh))
+    asianHigh := high
+    asianLow := low
+else
+    if isInAsian
+        asianHigh := math.max(nz(asianHigh, high), high)
+        asianLow := math.min(nz(asianLow, low), low)
+
+// When session ends we keep the last box values for breakout checks (persist til next day's box defined)
+boxHigh = asianHigh
+boxLow = asianLow
+
+// Allow trades only in window after London open (simplified hour-based)
+hNow = hour(time)
+allowTradeByHour = (hNow >= londonHour) and (hNow < (londonHour + tradeWindowHours))
+
+tpTicks = tpIsPips ? tpPoints * syminfo.mintick : tpPoints
+offset_bf = entryOffsetPts_bf * syminfo.mintick
+
+// breakout detection (using chart timeframe)
+breakLong_bf = useBreakfast and symOK and allowTradeByHour and (close > boxHigh) and (boxHigh != na)
+breakShort_bf = useBreakfast and symOK and allowTradeByHour and (close < boxLow) and (boxLow != na)
+
+longEntry_bf = close
+longSL_bf = low
+shortEntry_bf = close
+shortSL_bf = high
+
+longStopDist_bf = math.abs(longEntry_bf - longSL_bf)
+shortStopDist_bf = math.abs(shortSL_bf - shortEntry_bf)
+longQty_bf = f_qty_from_risk(riskAmt, longStopDist_bf)
+shortQty_bf = f_qty_from_risk(riskAmt, shortStopDist_bf)
+
+if breakLong_bf and strategy.position_size == 0
+    strategy.entry("Breakfast Long", strategy.long, qty=longQty_bf, comment="Breakfast Long")
+    strategy.exit("Breakfast L Exit", "Breakfast Long", stop=longSL_bf, limit=longEntry_bf + tpTicks)
+if breakShort_bf and strategy.position_size == 0
+    strategy.entry("Breakfast Short", strategy.short, qty=shortQty_bf, comment="Breakfast Short")
+    strategy.exit("Breakfast S Exit", "Breakfast Short", stop=shortSL_bf, limit=shortEntry_bf - tpTicks)
+
+// Plot asian box lines
+plot(useBreakfast and boxHigh != na ? boxHigh : na, title="Asian Box High", color=color.orange, linewidth=1)
+plot(useBreakfast and boxLow  != na ? boxLow  : na, title="Asian Box Low",  color=color.orange, linewidth=1)
+
+alertcondition(breakLong_bf, title="Breakfast Long Signal", message="Breakfast Long candidate on {{ticker}}")
+alertcondition(breakShort_bf, title="Breakfast Short Signal", message="Breakfast Short candidate on {{ticker}}")
+
+// ======================================================
+// ========== Common housekeeping & notes ===============
+// ======================================================
+// Notes shown in the strategy's "info" pane (use strategy notes to remind yourself):
+var string notes = "GSecker Master — assumptions:\n• 180PC: ring detection simplified when chart TF != signal TF. Best run on H4 for fidelity.\n• Bollinger: BB/EMA checks use signal TF (default H4) and optional D1 confirm.\n• Breakfast: Asian box times are exchange-time inputs; double-check versus broker server time.\n• Risk sizing uses account * risk% / price-distance (in price units). Adjust account & risk% accordingly.\n• No news filter implemented. Partial exits / advanced trade management are not included; can be added.\n\nIf you want changes (partials, BE move, trail after N R, different sizing like 50-75% notional) tell me which and I will update the script."
+
+// Show a small label with selected mode
+var label l = na
+if barstate.islast
+    label.delete(l)
+    l := label.new(bar_index, high, text="Mode: " + mode, style=label.style_label_left, color=color.new(color.blue, 0), textcolor=color.white, size=size.small)
+
+
+// End of script
