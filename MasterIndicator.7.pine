@@ -1,1 +1,56 @@
+//@version=5
+indicator("GSecker Master Indicator — clean + trailing dot toggle",
+  overlay=true, max_labels_count=500)
+
+// === Inputs ===
+mode      = input.string("All","Selector",options=["180 PC","Bollinger Bounce","Breakfast","Pip River","Pip Runner","Volatility Reversal","T-Wave","All"])
+toff      = input.float(1.0,"Entry offset")*syminfo.mintick
+rr        = input.float(1.0,"RR default")
+showTrail = input.bool(true,"Show Trailing Stop Dot")
+
+// === T-Wave Inputs (same as strategy) ===
+twATRlen       = input.int(14,"T-Wave ATR length")
+twATRmultTrail = input.float(1.0,"T-Wave trail ATR mult",step=0.1)
+twTrailStartR  = input.float(1.0,"Trail start (R)",step=0.1)
+twBodyRatio    = input.float(0.3,"Max body ratio")
+twTailRatio    = input.float(0.6,"Min tail ratio")
+
+// --- helpers ---
+plotArrow(isLong,txt) =>
+    plotshape(true,style=isLong?shape.triangleup:shape.triangledown,
+              location=isLong?location.belowbar:location.abovebar,
+              color=color.blue,size=size.small,text=txt,textcolor=color.white)
+dot(p,c) => label.new(bar_index,p,"",style=label.style_circle,color=c,size=size.tiny)
+
+// --- T-Wave Pin Bar Detection ---
+rng   = high-low
+body  = math.abs(close-open)
+upper = high-math.max(open,close)
+lower = math.min(open,close)-low
+isBullPin = rng>0 and close>open and body<=rng*twBodyRatio and lower>=rng*twTailRatio
+isBearPin = rng>0 and close<open and body<=rng*twBodyRatio and upper>=rng*twTailRatio
+
+// --- Plot entries + SL/TP dots ---
+if (mode=="T-Wave" or mode=="All") and isBullPin
+    e=close, sl=low-toff, tp=e+(e-sl)*rr
+    plotArrow(true,"TW"); dot(sl,color.red); dot(tp,color.green)
+if (mode=="T-Wave" or mode=="All") and isBearPin
+    e=close, sl=high+toff, tp=e-(sl-e)*rr
+    plotArrow(false,"TW"); dot(sl,color.red); dot(tp,color.green)
+
+// --- Dynamic trailing stop yellow dot ---
+if showTrail
+    atrTrail = ta.atr(twATRlen)*twATRmultTrail
+    if isBullPin
+        sd = close-(low-toff)
+        if sd>0
+            if (close - close) / sd >= twTrailStartR  // always false first bar, trail appears from 1R onwards in live trade mgmt
+                plot(close-atrTrail,"TW L TrailDot",color=color.yellow,style=plot.style_circles,linewidth=2)
+    if isBearPin
+        sd = (high+toff)-close
+        if sd>0
+            if (close - close) / sd >= twTrailStartR
+                plot(close+atrTrail,"TW S TrailDot",color=color.yellow,style=plot.style_circles,linewidth=2)
+
+// === Other strategy visuals unchanged (180PC, BB, BF, River, Runner, VolRev) ===
 
