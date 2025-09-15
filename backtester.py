@@ -1,3 +1,15 @@
+'''
+Reads your trades.csv (from alert logger).
+
+Rebuilds each trade from entry → exit.
+
+Computes R-multiple for each trade (normalized profit).
+
+Prints win rate, expectancy.
+
+Plots an equity curve in R units.
+'''
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
