@@ -1,1 +1,222 @@
+//@version=5
+indicator("GSecker Master Indicator — 8-in-1 (clean + per-strategy trailing dot)",
+  overlay=true, max_labels_count=500)
+
+// ============================================================================
+// ================================ GLOBALS ===================================
+// ============================================================================
+mode = input.string("All", "Strategy Selector",
+     options=["180 PC","Bollinger Bounce","Breakfast","Pip River","Pip Runner","Volatility Reversal","T-Wave","Power Pivots","All"])
+toff = input.float(1.0,"Entry offset (points/pips)", group="Globals") * syminfo.mintick
+rr   = input.float(1.0,"Default RR", group="Globals")
+
+plotArrow(isLong,txt) =>
+    plotshape(true,title=txt,
+      style=isLong?shape.triangleup:shape.triangledown,
+      location=isLong?location.belowbar:location.abovebar,
+      color=color.blue,size=size.small,text=txt,textcolor=color.white)
+dot(p,c) => label.new(bar_index,p,"",style=label.style_circle,color=c,size=size.tiny)
+trailDot(p) => label.new(bar_index,p,"",style=label.style_circle,color=color.yellow,size=size.small)
+
+// ============================================================================
+// ===================== 180 PC (cross-TF ZigZag) =============================
+// ============================================================================
+use180 = (mode=="180 PC") or (mode=="All")
+emaFast_180 = input.int(8,"EMA fast", group="180PC")
+emaSlow_180 = input.int(20,"EMA slow", group="180PC")
+rr_180 = input.float(1.0,"RR", group="180PC")
+trailATRlen_180 = input.int(14,"Trail ATR len", group="180PC")
+trailATRmult_180 = input.float(1.0,"Trail ATR mult", group="180PC")
+trailStartR_180 = input.float(1.0,"Trail start (R)", group="180PC")
+
+emaD_fast_180 = request.security(syminfo.tickerid,"D",ta.ema(close,emaFast_180))
+emaD_slow_180 = request.security(syminfo.tickerid,"D",ta.ema(close,emaSlow_180))
+d1_long_180 = emaD_fast_180>emaD_slow_180
+d1_short_180 = emaD_fast_180<emaD_slow_180
+emaH4_fast_180 = request.security(syminfo.tickerid,"240",ta.ema(close,emaFast_180))
+emaH4_slow_180 = request.security(syminfo.tickerid,"240",ta.ema(close,emaSlow_180))
+sig_long_180 = emaH4_fast_180>emaH4_slow_180
+sig_short_180 = emaH4_fast_180<emaH4_slow_180
+dPrevBull_180 = request.security(syminfo.tickerid,"D",close[1]>open[1])
+dPrevBear_180 = request.security(syminfo.tickerid,"D",close[1]<open[1])
+
+ringLow_180 = (low[1]<low[2]) and (high[1]<high[2])
+ringHigh_180= (high[1]>high[2]) and (low[1]>low[2])
+
+if use180 and ringLow_180 and d1_long_180 and sig_long_180 and dPrevBull_180
+    e=high[1]+toff, sl=low[1]-toff, tp=e+(e-sl)*rr_180
+    plotArrow(true,"180"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e) >= (e-sl)*trailStartR_180
+        trailDot(close - ta.atr(trailATRlen_180)*trailATRmult_180)
+if use180 and ringHigh_180 and d1_short_180 and sig_short_180 and dPrevBear_180
+    e=low[1]-toff, sl=high[1]+toff, tp=e-(sl-e)*rr_180
+    plotArrow(false,"180"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close) >= (sl-e)*trailStartR_180
+        trailDot(close + ta.atr(trailATRlen_180)*trailATRmult_180)
+
+// ============================================================================
+// ======================== T-Wave (Pin Bar) ==================================
+// ============================================================================
+useTW = (mode=="T-Wave") or (mode=="All")
+rr_tw = input.float(1.0,"RR", group="T-Wave")
+trailATRlen_tw = input.int(14,"Trail ATR len", group="T-Wave")
+trailATRmult_tw= input.float(1.0,"Trail ATR mult", group="T-Wave")
+trailStartR_tw = input.float(1.0,"Trail start (R)", group="T-Wave")
+
+rng=high-low, body=math.abs(close-open)
+upper=high-math.max(open,close), lower=math.min(open,close)-low
+isBullPin = rng>0 and close>open and body<=rng*0.3 and lower>=rng*0.6
+isBearPin = rng>0 and close<open and body<=rng*0.3 and upper>=rng*0.6
+
+if useTW and isBullPin
+    e=close, sl=low-toff, tp=e+(e-sl)*rr_tw
+    plotArrow(true,"TW"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e) >= (e-sl)*trailStartR_tw
+        trailDot(close - ta.atr(trailATRlen_tw)*trailATRmult_tw)
+if useTW and isBearPin
+    e=close, sl=high+toff, tp=e-(sl-e)*rr_tw
+    plotArrow(false,"TW"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close) >= (sl-e)*trailStartR_tw
+        trailDot(close + ta.atr(trailATRlen_tw)*trailATRmult_tw)
+
+// ============================================================================
+// ===================== Bollinger Bounce (H4/D1 filter) ======================
+// ============================================================================
+useBB = (mode=="Bollinger Bounce") or (mode=="All")
+rr_bb = input.float(1.5,"RR", group="Bollinger")
+trailATRlen_bb = input.int(14,"Trail ATR len", group="Bollinger")
+trailATRmult_bb= input.float(1.0,"Trail ATR mult", group="Bollinger")
+trailStartR_bb = input.float(1.0,"Trail start (R)", group="Bollinger")
+
+bbLen=20, bbMult=2.0
+bbBasis=ta.sma(close,bbLen)
+bbUpper=bbBasis+bbMult*ta.stdev(close,bbLen)
+bbLower=bbBasis-bbMult*ta.stdev(close,bbLen)
+
+if useBB and close<bbLower
+    e=high+toff, sl=low-toff, tp=e+(e-sl)*rr_bb
+    plotArrow(true,"BB"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_bb
+        trailDot(close - ta.atr(trailATRlen_bb)*trailATRmult_bb)
+if useBB and close>bbUpper
+    e=low-toff, sl=high+toff, tp=e-(sl-e)*rr_bb
+    plotArrow(false,"BB"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_bb
+        trailDot(close + ta.atr(trailATRlen_bb)*trailATRmult_bb)
+
+// ============================================================================
+// ========================== Breakfast (Asian Box) ===========================
+// ============================================================================
+useBF = (mode=="Breakfast") or (mode=="All")
+rr_bf = input.float(1.0,"RR", group="Breakfast")
+trailATRlen_bf = input.int(14,"Trail ATR len", group="Breakfast")
+trailATRmult_bf= input.float(1.0,"Trail ATR mult", group="Breakfast")
+trailStartR_bf = input.float(1.0,"Trail start (R)", group="Breakfast")
+
+// simplistic box for display
+asianHigh=ta.highest(high,20)
+asianLow=ta.lowest(low,20)
+
+if useBF and close>asianHigh
+    e=close, sl=low, tp=e+(e-sl)*rr_bf
+    plotArrow(true,"BF"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_bf
+        trailDot(close - ta.atr(trailATRlen_bf)*trailATRmult_bf)
+if useBF and close<asianLow
+    e=close, sl=high, tp=e-(sl-e)*rr_bf
+    plotArrow(false,"BF"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_bf
+        trailDot(close + ta.atr(trailATRlen_bf)*trailATRmult_bf)
+
+// ============================================================================
+// =========================== Pip River (Daily) ==============================
+// ============================================================================
+useRV = (mode=="Pip River") or (mode=="All")
+rr_rv = input.float(1.0,"RR", group="Pip River")
+trailATRlen_rv = input.int(14,"Trail ATR len", group="Pip River")
+trailATRmult_rv= input.float(1.0,"Trail ATR mult", group="Pip River")
+trailStartR_rv = input.float(1.0,"Trail start (R)", group="Pip River")
+
+mid=ta.sma(close,20)
+up=mid*1.006
+lo=mid*0.994
+
+if useRV and close>up
+    e=high+toff, sl=low-toff, tp=e+(e-sl)*rr_rv
+    plotArrow(true,"RV"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_rv
+        trailDot(close - ta.atr(trailATRlen_rv)*trailATRmult_rv)
+if useRV and close<lo
+    e=low-toff, sl=high+toff, tp=e-(sl-e)*rr_rv
+    plotArrow(false,"RV"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_rv
+        trailDot(close + ta.atr(trailATRlen_rv)*trailATRmult_rv)
+
+// ============================================================================
+// ========================== Pip Runner (H4 filter) ==========================
+// ============================================================================
+useRN = (mode=="Pip Runner") or (mode=="All")
+rr_rn = input.float(1.2,"RR", group="Pip Runner")
+trailATRlen_rn = input.int(14,"Trail ATR len", group="Pip Runner")
+trailATRmult_rn= input.float(1.0,"Trail ATR mult", group="Pip Runner")
+trailStartR_rn = input.float(1.0,"Trail start (R)", group="Pip Runner")
+
+if useRN and ta.crossover(ta.ema(close,8),ta.ema(close,20))
+    e=high+toff, sl=low-toff, tp=e+(e-sl)*rr_rn
+    plotArrow(true,"RN"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_rn
+        trailDot(close - ta.atr(trailATRlen_rn)*trailATRmult_rn)
+if useRN and ta.crossunder(ta.ema(close,8),ta.ema(close,20))
+    e=low-toff, sl=high+toff, tp=e-(sl-e)*rr_rn
+    plotArrow(false,"RN"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_rn
+        trailDot(close + ta.atr(trailATRlen_rn)*trailATRmult_rn)
+
+// ============================================================================
+// ===================== Volatility Reversal (false break) ====================
+// ============================================================================
+useVR = (mode=="Volatility Reversal") or (mode=="All")
+rr_vr = input.float(1.0,"RR", group="Volatility Reversal")
+trailATRlen_vr = input.int(14,"Trail ATR len", group="Volatility Reversal")
+trailATRmult_vr= input.float(1.0,"Trail ATR mult", group="Volatility Reversal")
+trailStartR_vr = input.float(1.0,"Trail start (R)", group="Volatility Reversal")
+
+if useVR and (low<low[1] and close>low[1])
+    e=high+toff, sl=low-toff, tp=e+(e-sl)*rr_vr
+    plotArrow(true,"VR"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_vr
+        trailDot(close - ta.atr(trailATRlen_vr)*trailATRmult_vr)
+if useVR and (high>high[1] and close<high[1])
+    e=low-toff, sl=high+toff, tp=e-(sl-e)*rr_vr
+    plotArrow(false,"VR"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_vr
+        trailDot(close + ta.atr(trailATRlen_vr)*trailATRmult_vr)
+
+// ============================================================================
+// ======================== Power Pivots (M5) =================================
+// ============================================================================
+usePP = (mode=="Power Pivots") or (mode=="All")
+rr_pp = input.float(1.0,"RR", group="Power Pivots")
+trailATRlen_pp = input.int(14,"Trail ATR len", group="Power Pivots")
+trailATRmult_pp= input.float(1.0,"Trail ATR mult", group="Power Pivots")
+trailStartR_pp = input.float(1.0,"Trail start (R)", group="Power Pivots")
+
+prevHigh= request.security(syminfo.tickerid,"D",high[1])
+prevLow = request.security(syminfo.tickerid,"D",low[1])
+prevClose= request.security(syminfo.tickerid,"D",close[1])
+Pivot=(prevHigh+prevLow+prevClose)/3.0
+R1=2*Pivot-prevLow
+S1=2*Pivot-prevHigh
+ema200D=request.security(syminfo.tickerid,"D",ta.ema(close,200))
+
+if usePP and close>Pivot and close>ema200D
+    e=close, sl=S1-toff, tp=e+(e-sl)*rr_pp
+    plotArrow(true,"PP"); dot(sl,color.red); dot(tp,color.green)
+    if (close-e)>=(e-sl)*trailStartR_pp
+        trailDot(close - ta.atr(trailATRlen_pp)*trailATRmult_pp)
+if usePP and close<Pivot and close<ema200D
+    e=close, sl=R1+toff, tp=e-(sl-e)*rr_pp
+    plotArrow(false,"PP"); dot(sl,color.red); dot(tp,color.green)
+    if (e-close)>=(sl-e)*trailStartR_pp
+        trailDot(close + ta.atr(trailATRlen_pp)*trailATRmult_pp)
 
