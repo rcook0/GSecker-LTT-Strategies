@@ -4,6 +4,14 @@ Monte Carlo resampling is useful because it shows how much results depend on tra
 If your system is robust → reshuffling trade order won’t break it.
 
 If fragile → expectancy may look good, but a different sequence could wipe you out (important for risk sizing).
+
+Features:
+
+Monte Carlo resampling (montecarlo_runs=1000 by default).
+
+Randomizes trade order repeatedly, plots distribution of final equity.
+
+Reports median final equity, 5th percentile, 95th percentile → shows robustness.
 ''
 
 import pandas as pd
