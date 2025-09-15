@@ -1,1 +1,570 @@
+//@version=5
+strategy("GSecker Master Strategy — 8-in-1 (per-strategy trails + cross-TF 180PC)",
+  overlay=true,
+  calc_on_every_tick=true,
+  initial_capital=10000,
+  default_qty_type=strategy.fixed,
+  pyramiding=1,
+  commission_type=strategy.commission.percent, commission_value=0.0)
+
+// ============================================================================
+// ================================ GLOBALS ===================================
+// ============================================================================
+mode = input.string("All", "Strategy Selector",
+     options=["180 PC","Bollinger Bounce","Breakfast","Pip River","Pip Runner","Volatility Reversal","T-Wave","Power Pivots","All"])
+
+acctSize = input.float(10000, "Account Size", group="Globals")
+riskPct  = input.float(1.0, "Risk % per Trade", minval=0.01, group="Globals")
+offsetPips = input.float(1.0, "Entry offset (points/pips)", group="Globals")
+TICK = syminfo.mintick
+toff = offsetPips * TICK
+
+riskAmt() => acctSize * (riskPct / 100.0)
+qtyFromRisk(stopDist) => math.max(0.0, riskAmt() / math.max(stopDist, TICK))
+
+// optional symbol restriction
+restrictSymbols = input.bool(false, "Restrict symbols (XAU, BTC, GBPJPY)", group="Globals")
+allowXAU = input.bool(true, "XAUUSD", group="Globals")
+allowBTC = input.bool(true, "BTCUSD/USDT", group="Globals")
+allowGJ  = input.bool(true, "GBPJPY", group="Globals")
+symOK = not restrictSymbols or ( (allowXAU and str.contains(syminfo.ticker, "XAU")) or (allowBTC and (str.contains(syminfo.ticker, "BTC") or str.contains(syminfo.ticker,"BTCUSDT"))) or (allowGJ and str.contains(syminfo.ticker,"GBPJPY")) )
+
+// helper to place stop-entry with TP/SL (stop entry) or market entry
+placeEntry(id, dir, isMarket, entryPrice, slPrice, rr, trailOffset, trailStartR, trailATRlen, trailATRmult) =>
+    sd = math.abs(entryPrice - slPrice)
+    qty = qtyFromRisk(sd)
+    if isMarket
+        if dir == "L"
+            strategy.entry(id, strategy.long, qty=qty)
+            // primary exit: SL + TP by RR
+            strategy.exit(id + "_X", id, stop=slPrice, limit=entryPrice + rr * sd)
+        else
+            strategy.entry(id, strategy.short, qty=qty)
+            strategy.exit(id + "_X", id, stop=slPrice, limit=entryPrice - rr * sd)
+    else
+        if dir == "L"
+            strategy.order(id, strategy.long, qty=qty, stop=entryPrice)
+            strategy.exit(id + "_X", id, stop=slPrice, limit=entryPrice + rr * sd)
+        else
+            strategy.order(id, strategy.short, qty=qty, stop=entryPrice)
+            strategy.exit(id + "_X", id, stop=slPrice, limit=entryPrice - rr * sd)
+    // set a trailing exit if and when trade reaches trailStartR (see per-module code below)
+    // returns qty placed for debugging
+    qty
+
+// helper to plot yellow trail dot
+plotTrailDot(prefix, price) =>
+    label.new(bar_index, price, "", style=label.style_circle, color=color.new(color.yellow, 0), size=size.small)
+
+// Use a helper that stores module-local state via var for each module. We'll store entry/stop/active flags.
+// Note: pine's scoping is global — we emulate modular state using unique var names per module.
+
+// ============================================================================
+// ===================== 180 PC (enhanced) with cross-TF ZigZag =================
+// ============================================================================
+/*
+ - Run this on your signal TF (H4 usually) and it will use higher TF pivot sampling:
+   H4 signals => use D1 pivots (pivothigh/pivotlow with depths 10/20)
+   D1 signals => use W pivots (depths 10/20)
+ - Requires D1 EMA(8) > EMA(20) and sigTF EMA(8) > EMA(20) for longs (and reversed for shorts)
+ - Requires zigzag-style cycle confirmation (two swing cycles) on higher TF.
+*/
+use180 = (mode == "180 PC") or (mode == "All")
+sigTF_180 = input.timeframe("240", "180PC: Signal TF (H4=240 or D1=D)")
+emaFast_180 = input.int(8, "180PC EMA fast", group="180PC")
+emaSlow_180 = input.int(20, "180PC EMA slow", group="180PC")
+zzATRmult_180 = input.float(2.5, "180PC ZigZag ATR mult (N)", group="180PC")
+zzATRlen_180 = input.int(14, "180PC ZigZag ATR len", group="180PC")
+rr_180 = input.float(1.0, "180PC Reward:Risk", group="180PC")
+requireWeeklyForD1 = input.bool(true, "180PC: require weekly agreement for D1 signals", group="180PC")
+zzPivotDepthA = input.int(10, "180PC higher-TF pivot depth A", group="180PC")
+zzPivotDepthB = input.int(20, "180PC higher-TF pivot depth B", group="180PC")
+// trailing settings for 180PC
+trailATRlen_180 = input.int(14, "180PC trail ATR len", group="180PC")
+trailATRmult_180 = input.float(1.0, "180PC trail ATR mult", group="180PC")
+trailStartR_180 = input.float(1.0, "180PC trail start (R)", group="180PC")
+
+// HTF EMA bias (daily)
+emaD_fast_180 = request.security(syminfo.tickerid, "D", ta.ema(close, emaFast_180))
+emaD_slow_180 = request.security(syminfo.tickerid, "D", ta.ema(close, emaSlow_180))
+d1_long_180 = emaD_fast_180 > emaD_slow_180
+d1_short_180 = emaD_fast_180 < emaD_slow_180
+
+// SigTF EMA on the sig timeframe
+emaSig_fast_180 = request.security(syminfo.tickerid, sigTF_180, ta.ema(close, emaFast_180))
+emaSig_slow_180 = request.security(syminfo.tickerid, sigTF_180, ta.ema(close, emaSlow_180))
+sig_long_180 = emaSig_fast_180 > emaSig_slow_180
+sig_short_180 = emaSig_fast_180 < emaSig_slow_180
+
+// Daily candle bias (previous daily candle color)
+dPrevBull_180 = request.security(syminfo.tickerid, "D", close[1] > open[1])
+dPrevBear_180 = request.security(syminfo.tickerid, "D", close[1] < open[1])
+
+// weekly EMA for D1 signals
+emaW_fast_180 = request.security(syminfo.tickerid, "W", ta.ema(close, emaFast_180))
+emaW_slow_180 = request.security(syminfo.tickerid, "W", ta.ema(close, emaSlow_180))
+w_long_180 = emaW_fast_180 > emaW_slow_180
+w_short_180 = emaW_fast_180 < emaW_slow_180
+
+// determine higher TF for zigzag pivot sampling
+higherTF180 = sigTF_180 == "D" ? "W" : "D"
+
+// sample pivots on higher TF (stricter depths)
+hp1_180 = request.security(syminfo.tickerid, higherTF180, ta.pivothigh(high, zzPivotDepthA, zzPivotDepthA))
+hp2_180 = request.security(syminfo.tickerid, higherTF180, ta.pivothigh(high, zzPivotDepthB, zzPivotDepthB))
+lp1_180 = request.security(syminfo.tickerid, higherTF180, ta.pivotlow(low, zzPivotDepthA, zzPivotDepthA))
+lp2_180 = request.security(syminfo.tickerid, higherTF180, ta.pivotlow(low, zzPivotDepthB, zzPivotDepthB))
+
+sigCycleUpOk_180 = not na(hp1_180) and not na(hp2_180) and not na(lp1_180) and not na(lp2_180) and (hp1_180 > hp2_180) and (lp1_180 > lp2_180)
+sigCycleDnOk_180 = not na(hp1_180) and not na(hp2_180) and not na(lp1_180) and not na(lp2_180) and (hp1_180 < hp2_180) and (lp1_180 < lp2_180)
+
+// ring detection (signal in sigTF timeframe assumed)
+ringLow_180 = (low[1] < low[2]) and (high[1] < high[2])
+ringHigh_180 = (high[1] > high[2]) and (low[1] > low[2])
+
+allowLong180 = d1_long_180 and sig_long_180 and sigCycleUpOk_180 and dPrevBull_180
+allowShort180 = d1_short_180 and sig_short_180 and sigCycleDnOk_180 and dPrevBear_180
+if timeframe.period == "D" and requireWeeklyForD1
+    allowLong180 := allowLong180 and w_long_180
+    allowShort180 := allowShort180 and w_short_180
+
+// Module-local vars to track trade for 180PC
+var bool inTrade_180 = false
+var float entry_180 = na
+var float stop_180 = na
+
+if use180 and symOK and (strategy.position_size == 0)
+    if ringLow_180 and allowLong180
+        entry_180 := high[1] + toff
+        stop_180 := low[1] - toff
+        placeEntry("180PC_L", "L", false, entry_180, stop_180, rr_180, trailATRmult_180, trailStartR_180, trailATRlen_180, trailATRmult_180)
+        inTrade_180 := true
+    if ringHigh_180 and allowShort180
+        entry_180 := low[1] - toff
+        stop_180 := high[1] + toff
+        placeEntry("180PC_S", "S", false, entry_180, stop_180, rr_180, trailATRmult_180, trailStartR_180, trailATRlen_180, trailATRmult_180)
+        inTrade_180 := true
+
+// detect close of position to clear local tracking (approx)
+if inTrade_180 and strategy.position_size == 0
+    inTrade_180 := false
+    entry_180 := na
+    stop_180 := na
+
+// trailing activation: when position exists for 180PC, if profit >= R, attach trail
+if inTrade_180 and strategy.position_size != 0
+    // find current position average & compute current realized R relative to stop_180
+    posAvg = strategy.position_avg_price
+    isLongPos = strategy.position_size > 0
+    if not na(entry_180) and not na(stop_180)
+        initRisk = math.abs(entry_180 - stop_180)
+        // current profit in price units
+        currProfit = isLongPos ? (close - entry_180) : (entry_180 - close)
+        if currProfit >= trailStartR_180 * initRisk
+            // compute ATR-based trail offset
+            trailOffset = ta.atr(trailATRlen_180) * trailATRmult_180
+            // attach trailing exit (update existing exit to add trail)
+            if isLongPos
+                strategy.exit(id="180PC_L_Trail", from_entry="180PC_L", trail_offset=trailOffset)
+                plotTrailDot("180PC_L", close - trailOffset)
+            else
+                strategy.exit(id="180PC_S_Trail", from_entry="180PC_S", trail_offset=trailOffset)
+                plotTrailDot("180PC_S", close + trailOffset)
+
+// ============================================================================
+// ===================== Bollinger Bounce ====================================
+// ============================================================================
+useBB = (mode == "Bollinger Bounce") or (mode == "All")
+sigTF_bb = input.timeframe("240", "BB Signal TF", group="Bollinger")
+ema50_bb = input.int(50, "BB EMA 50", group="Bollinger")
+ema100_bb = input.int(100, "BB EMA 100", group="Bollinger")
+bbLen = input.int(20, "BB Length", group="Bollinger")
+bbMult = input.float(2.0, "BB Mult", group="Bollinger")
+rr_bb = input.float(1.5, "BB Reward:Risk", group="Bollinger")
+requireD1_bb = input.bool(true, "BB require D1 EMA", group="Bollinger")
+// trailing for BB
+trailATRlen_bb = input.int(14, "BB trail ATR len", group="Bollinger")
+trailATRmult_bb = input.float(1.0, "BB trail ATR mult", group="Bollinger")
+trailStartR_bb = input.float(1.0, "BB trail start (R)", group="Bollinger")
+
+emaD50_bb = request.security(syminfo.tickerid, "D", ta.ema(close, ema50_bb))
+emaD100_bb = request.security(syminfo.tickerid, "D", ta.ema(close, ema100_bb))
+d1_up_bb = emaD50_bb > emaD100_bb
+d1_down_bb = emaD50_bb < emaD100_bb
+
+emaH50_bb = request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema50_bb))
+emaH100_bb = request.security(syminfo.tickerid, sigTF_bb, ta.ema(close, ema100_bb))
+h4_up_bb = emaH50_bb > emaH100_bb
+h4_down_bb = emaH50_bb < emaH100_bb
+
+bb_mean = request.security(syminfo.tickerid, sigTF_bb, ta.sma(close, bbLen))
+bb_std = request.security(syminfo.tickerid, sigTF_bb, ta.stdev(close, bbLen))
+bb_upper = bb_mean + bbMult * bb_std
+bb_lower = bb_mean - bbMult * bb_std
+
+close_sig_bb = request.security(syminfo.tickerid, sigTF_bb, close)
+prev_high_sig_bb = request.security(syminfo.tickerid, sigTF_bb, high[1])
+prev_low_sig_bb = request.security(syminfo.tickerid, sigTF_bb, low[1])
+
+// module state
+var bool inTrade_bb = false
+var float entry_bb = na
+var float stop_bb = na
+
+if useBB and symOK and strategy.position_size == 0
+    longCond_bb = (close_sig_bb < bb_lower) and h4_up_bb and (not requireD1_bb or d1_up_bb)
+    shortCond_bb = (close_sig_bb > bb_upper) and h4_down_bb and (not requireD1_bb or d1_down_bb)
+    if longCond_bb
+        entry_bb := prev_high_sig_bb + toff
+        stop_bb := prev_low_sig_bb
+        placeEntry("BB_L", "L", false, entry_bb, stop_bb, rr_bb, trailATRmult_bb, trailStartR_bb, trailATRlen_bb, trailATRmult_bb)
+        inTrade_bb := true
+    if shortCond_bb
+        entry_bb := prev_low_sig_bb - toff
+        stop_bb := prev_high_sig_bb
+        placeEntry("BB_S", "S", false, entry_bb, stop_bb, rr_bb, trailATRmult_bb, trailStartR_bb, trailATRlen_bb, trailATRmult_bb)
+        inTrade_bb := true
+
+if inTrade_bb and strategy.position_size == 0
+    inTrade_bb := false
+    entry_bb := na
+    stop_bb := na
+
+if inTrade_bb and strategy.position_size != 0
+    // compute initial risk and current profit relative to entry
+    initRisk_bb = math.abs(entry_bb - stop_bb)
+    currProfit_bb = (strategy.position_size > 0) ? (close - entry_bb) : (entry_bb - close)
+    if currProfit_bb >= trailStartR_bb * initRisk_bb
+        trailOffset_bb = ta.atr(trailATRlen_bb) * trailATRmult_bb
+        if strategy.position_size > 0
+            strategy.exit("BB_L_Trail", from_entry="BB_L", trail_offset=trailOffset_bb)
+            plotTrailDot("BB_L", close - trailOffset_bb)
+        else
+            strategy.exit("BB_S_Trail", from_entry="BB_S", trail_offset=trailOffset_bb)
+            plotTrailDot("BB_S", close + trailOffset_bb)
+
+// ============================================================================
+// ========================= Breakfast (Asian Box) ============================
+// ============================================================================
+useBF = (mode == "Breakfast") or (mode == "All")
+asianStart = input.session("0000-0700", "Breakfast: Asian session", group="Breakfast")
+londonHour = input.int(8, "Breakfast: London Open Hour", group="Breakfast")
+windowHrs = input.int(3, "Hours after LO", group="Breakfast")
+tpPipsBF = input.int(30, "Breakfast TP (pips)", group="Breakfast")
+// trailing for Breakfast
+trailATRlen_bf = input.int(14, "Breakfast trail ATR len", group="Breakfast")
+trailATRmult_bf = input.float(1.0, "Breakfast trail ATR mult", group="Breakfast")
+trailStartR_bf = input.float(1.0, "Breakfast trail start (R)", group="Breakfast")
+
+var float asianHigh = na
+var float asianLow = na
+inAsian = time(timeframe.period, asianStart)
+if ta.change(inAsian) and inAsian
+    asianHigh := high
+    asianLow := low
+else
+    if inAsian
+        asianHigh := math.max(nz(asianHigh, high), high)
+        asianLow := math.min(nz(asianLow, low), low)
+
+boxHigh = asianHigh
+boxLow = asianLow
+
+hNow = hour(time)
+allowBF = (hNow >= londonHour) and (hNow < (londonHour + windowHrs))
+tpTicksBF = tpPipsBF * TICK
+
+var bool inTrade_bf = false
+var float entry_bf = na
+var float stop_bf = na
+
+if useBF and symOK and strategy.position_size == 0 and boxHigh != na and boxLow != na and allowBF
+    if close > boxHigh
+        entry_bf := close
+        stop_bf := low
+        placeEntry("BF_L", "L", true, entry_bf, stop_bf, tpTicksBF / math.max(math.abs(entry_bf - stop_bf), TICK), trailATRmult_bf, trailStartR_bf, trailATRlen_bf, trailATRmult_bf)
+        inTrade_bf := true
+    if close < boxLow
+        entry_bf := close
+        stop_bf := high
+        placeEntry("BF_S", "S", true, entry_bf, stop_bf, tpTicksBF / math.max(math.abs(entry_bf - stop_bf), TICK), trailATRmult_bf, trailStartR_bf, trailATRlen_bf, trailATRmult_bf)
+        inTrade_bf := true
+
+if inTrade_bf and strategy.position_size == 0
+    inTrade_bf := false
+    entry_bf := na
+    stop_bf := na
+
+if inTrade_bf and strategy.position_size != 0
+    initRisk_bf = math.abs(entry_bf - stop_bf)
+    currProfit_bf = (strategy.position_size > 0) ? (close - entry_bf) : (entry_bf - close)
+    if currProfit_bf >= trailStartR_bf * initRisk_bf
+        trailOffset_bf = ta.atr(trailATRlen_bf) * trailATRmult_bf
+        if strategy.position_size > 0
+            strategy.exit("BF_L_Trail", from_entry="BF_L", trail_offset=trailOffset_bf)
+            plotTrailDot("BF_L", close - trailOffset_bf)
+        else
+            strategy.exit("BF_S_Trail", from_entry="BF_S", trail_offset=trailOffset_bf)
+            plotTrailDot("BF_S", close + trailOffset_bf)
+
+// ============================================================================
+// ========================== Pip River (Daily) ===============================
+// ============================================================================
+usePRv = (mode == "Pip River") or (mode == "All")
+envDev = input.float(0.6, "River Envelope %", group="Pip River")
+rr_rv = input.float(1.0, "River RR", group="Pip River")
+// trailing
+trailATRlen_rv = input.int(14, "River trail ATR len", group="Pip River")
+trailATRmult_rv = input.float(1.0, "River trail ATR mult", group="Pip River")
+trailStartR_rv = input.float(1.0, "River trail start (R)", group="Pip River")
+
+cD = request.security(syminfo.tickerid, "D", close)
+ema5D = request.security(syminfo.tickerid, "D", ta.ema(close, 5))
+ema20D = request.security(syminfo.tickerid, "D", ta.ema(close, 20))
+midD = request.security(syminfo.tickerid, "D", ta.sma(close, 20))
+upEnv = midD * (1 + envDev / 100.0)
+loEnv = midD * (1 - envDev / 100.0)
+phD = request.security(syminfo.tickerid, "D", high[1])
+plD = request.security(syminfo.tickerid, "D", low[1])
+
+var bool inTrade_rv = false
+var float entry_rv = na
+var float stop_rv = na
+
+if usePRv and symOK and strategy.position_size == 0
+    longOK_rv = (ema5D > ema20D) and (cD > upEnv)
+    shortOK_rv = (ema5D < ema20D) and (cD < loEnv)
+    if longOK_rv
+        entry_rv := phD + toff
+        stop_rv := plD - toff
+        placeEntry("RV_L", "L", false, entry_rv, stop_rv, rr_rv, trailATRmult_rv, trailStartR_rv, trailATRlen_rv, trailATRmult_rv)
+        inTrade_rv := true
+    if shortOK_rv
+        entry_rv := plD - toff
+        stop_rv := phD + toff
+        placeEntry("RV_S", "S", false, entry_rv, stop_rv, rr_rv, trailATRmult_rv, trailStartR_rv, trailATRlen_rv, trailATRmult_rv)
+        inTrade_rv := true
+
+if inTrade_rv and strategy.position_size == 0
+    inTrade_rv := false
+    entry_rv := na
+    stop_rv := na
+
+if inTrade_rv and strategy.position_size != 0
+    initRisk_rv = math.abs(entry_rv - stop_rv)
+    currProfit_rv = (strategy.position_size > 0) ? (close - entry_rv) : (entry_rv - close)
+    if currProfit_rv >= trailStartR_rv * initRisk_rv
+        trailOffset_rv = ta.atr(trailATRlen_rv) * trailATRmult_rv
+        if strategy.position_size > 0
+            strategy.exit("RV_L_Trail", from_entry="RV_L", trail_offset=trailOffset_rv)
+            plotTrailDot("RV_L", close - trailOffset_rv)
+        else
+            strategy.exit("RV_S_Trail", from_entry="RV_S", trail_offset=trailOffset_rv)
+            plotTrailDot("RV_S", close + trailOffset_rv)
+
+// ============================================================================
+// =========================== Pip Runner (H4/H1 filter) ======================
+// ============================================================================
+usePRn = (mode == "Pip Runner") or (mode == "All")
+rr_rn = input.float(1.2, "Runner RR", group="Pip Runner")
+trailATRlen_rn = input.int(14, "Runner trail ATR len", group="Pip Runner")
+trailATRmult_rn = input.float(1.0, "Runner trail ATR mult", group="Pip Runner")
+trailStartR_rn = input.float(1.0, "Runner trail start (R)", group="Pip Runner")
+
+emaD8_rn = request.security(syminfo.tickerid, "D", ta.ema(close, 8))
+emaD20_rn = request.security(syminfo.tickerid, "D", ta.ema(close, 20))
+prevBullD_rn = request.security(syminfo.tickerid, "D", close[1] > open[1])
+prevBearD_rn = request.security(syminfo.tickerid, "D", close[1] < open[1])
+emaH4_8_rn = request.security(syminfo.tickerid, "240", ta.ema(close, 8))
+emaH4_20_rn = request.security(syminfo.tickerid, "240", ta.ema(close, 20))
+ringLowH4_rn = request.security(syminfo.tickerid, "240", (low[1] < low[2]) and (high[1] < high[2]) ? 1 : 0) == 1
+ringHighH4_rn = request.security(syminfo.tickerid, "240", (high[1] > high[2]) and (low[1] > low[2]) ? 1 : 0) == 1
+phH4_rn = request.security(syminfo.tickerid, "240", high[1])
+plH4_rn = request.security(syminfo.tickerid, "240", low[1])
+
+var bool inTrade_rn = false
+var float entry_rn = na
+var float stop_rn = na
+
+if usePRn and symOK and strategy.position_size == 0
+    longOK_rn = emaD8_rn > emaD20_rn and prevBullD_rn and emaH4_8_rn > emaH4_20_rn and ringLowH4_rn
+    shortOK_rn = emaD8_rn < emaD20_rn and prevBearD_rn and emaH4_8_rn < emaH4_20_rn and ringHighH4_rn
+    if longOK_rn
+        entry_rn := phH4_rn + toff
+        stop_rn := plH4_rn - toff
+        placeEntry("RN_L", "L", false, entry_rn, stop_rn, rr_rn, trailATRmult_rn, trailStartR_rn, trailATRlen_rn, trailATRmult_rn)
+        inTrade_rn := true
+    if shortOK_rn
+        entry_rn := plH4_rn - toff
+        stop_rn := phH4_rn + toff
+        placeEntry("RN_S", "S", false, entry_rn, stop_rn, rr_rn, trailATRmult_rn, trailStartR_rn, trailATRlen_rn, trailATRmult_rn)
+        inTrade_rn := true
+
+if inTrade_rn and strategy.position_size == 0
+    inTrade_rn := false
+    entry_rn := na
+    stop_rn := na
+
+if inTrade_rn and strategy.position_size != 0
+    initRisk_rn = math.abs(entry_rn - stop_rn)
+    currProfit_rn = (strategy.position_size > 0) ? (close - entry_rn) : (entry_rn - close)
+    if currProfit_rn >= trailStartR_rn * initRisk_rn
+        trailOffset_rn = ta.atr(trailATRlen_rn) * trailATRmult_rn
+        if strategy.position_size > 0
+            strategy.exit("RN_L_Trail", from_entry="RN_L", trail_offset=trailOffset_rn)
+            plotTrailDot("RN_L", close - trailOffset_rn)
+        else
+            strategy.exit("RN_S_Trail", from_entry="RN_S", trail_offset=trailOffset_rn)
+            plotTrailDot("RN_S", close + trailOffset_rn)
+
+// ============================================================================
+// ======================= Volatility Reversal (false-break) ==================
+// ============================================================================
+useVR = (mode == "Volatility Reversal") or (mode == "All")
+rr_vr = input.float(1.0, "VolRev RR", group="VolRev")
+// trailing
+trailATRlen_vr = input.int(14, "VolRev trail ATR len", group="VolRev")
+trailATRmult_vr = input.float(1.0, "VolRev trail ATR mult", group="VolRev")
+trailStartR_vr = input.float(1.0, "VolRev trail start (R)", group="VolRev")
+
+longSignal_vr = (low < low[1]) and (close > low[1])
+shortSignal_vr = (high > high[1]) and (close < high[1])
+
+// one-bar expiry: place orders only on next bar after signal (simulate pending order)
+sigBarL_vr = ta.barssince(longSignal_vr) == 0
+sigBarS_vr = ta.barssince(shortSignal_vr) == 0
+
+var bool inTrade_vr = false
+var float entry_vr = na
+var float stop_vr = na
+
+if useVR and symOK and strategy.position_size == 0
+    if sigBarL_vr
+        entry_vr := high[1] + toff
+        stop_vr := low[1] - toff
+        placeEntry("VR_L", "L", false, entry_vr, stop_vr, rr_vr, trailATRmult_vr, trailStartR_vr, trailATRlen_vr, trailATRmult_vr)
+        inTrade_vr := true
+    if sigBarS_vr
+        entry_vr := low[1] - toff
+        stop_vr := high[1] + toff
+        placeEntry("VR_S", "S", false, entry_vr, stop_vr, rr_vr, trailATRmult_vr, trailStartR_vr, trailATRlen_vr, trailATRmult_vr)
+        inTrade_vr := true
+
+if inTrade_vr and strategy.position_size == 0
+    inTrade_vr := false
+    entry_vr := na
+    stop_vr := na
+
+if inTrade_vr and strategy.position_size != 0
+    initRisk_vr = math.abs(entry_vr - stop_vr)
+    currProfit_vr = (strategy.position_size > 0) ? (close - entry_vr) : (entry_vr - close)
+    if currProfit_vr >= trailStartR_vr * initRisk_vr
+        trailOffset_vr = ta.atr(trailATRlen_vr) * trailATRmult_vr
+        if strategy.position_size > 0
+            strategy.exit("VR_L_Trail", from_entry="VR_L", trail_offset=trailOffset_vr)
+            plotTrailDot("VR_L", close - trailOffset_vr)
+        else
+            strategy.exit("VR_S_Trail", from_entry="VR_S", trail_offset=trailOffset_vr)
+            plotTrailDot("VR_S", close + trailOffset_vr)
+
+// ============================================================================
+// ============================ Power Pivots (M5 entry) ========================
+// ============================================================================
+usePP = (mode == "Power Pivots") or (mode == "All")
+ppTF_entry = "5"  // M5 entries
+// inputs
+pp200EMA = input.int(200, "Power Pivot: Trend EMA (D)", group="Power Pivots")
+ppRR = input.float(1.0, "Power Pivot RR", group="Power Pivots")
+ppTrailATRlen = input.int(14, "PP trail ATR len", group="Power Pivots")
+ppTrailATRmult = input.float(1.0, "PP trail ATR mult", group="Power Pivots")
+ppTrailStartR = input.float(1.0, "PP trail start (R)", group="Power Pivots")
+ppPivotDepth = input.int(1, "PP pivot lookback (session)", group="Power Pivots") // we'll compute daily pivots from previous daily bar
+
+// D1 200 EMA
+ema200_D = request.security(syminfo.tickerid, "D", ta.ema(close, pp200EMA))
+d1_long_pp = request.security(syminfo.tickerid, "D", close > ema200_D)
+d1_short_pp = request.security(syminfo.tickerid, "D", close < ema200_D)
+
+// multi-TF confirm (H4 and H1 agree)
+h4_dir_pp = request.security(syminfo.tickerid, "240", ta.ema(close, 50)) // quick proxy - check slope by comparing to slower ema? We'll use 50EMA vs 200EMA on H4/H1 for direction
+h4_ema50 = request.security(syminfo.tickerid, "240", ta.ema(close, 50))
+h4_ema200 = request.security(syminfo.tickerid, "240", ta.ema(close, 200))
+h1_ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+h1_ema200 = request.security(syminfo.tickerid, "60", ta.ema(close, 200))
+
+h4_long = h4_ema50 > h4_ema200
+h4_short = h4_ema50 < h4_ema200
+h1_long = h1_ema50 > h1_ema200
+h1_short = h1_ema50 < h1_ema200
+
+// Daily pivot calculation (classic)
+prevHigh = request.security(syminfo.tickerid, "D", high[1])
+prevLow = request.security(syminfo.tickerid, "D", low[1])
+prevClose = request.security(syminfo.tickerid, "D", close[1])
+Pivot = (prevHigh + prevLow + prevClose) / 3.0
+R1 = 2 * Pivot - prevLow
+S1 = 2 * Pivot - prevHigh
+
+// module state
+var bool inTrade_pp = false
+var float entry_pp = na
+var float stop_pp = na
+
+// On M5 chart, entry when price breaks pivot in direction of D1 bias and H4/H1 agree
+if usePP and symOK and timeframe.period == ppTF_entry and strategy.position_size == 0
+    // LONG CASE
+    if (request.security(syminfo.tickerid, "D", close) > ema200_D) and h4_long and h1_long
+        // look for break above Pivot (close above pivot) on M5
+        if close > Pivot
+            entry_pp := close
+            stop_pp := S1 - toff  // stop just below S1 (symmetry to spec)
+            placeEntry("PP_L", "L", true, entry_pp, stop_pp, ppRR, ppTrailATRmult, ppTrailStartR, ppTrailATRlen, ppTrailATRmult)
+            inTrade_pp := true
+    // SHORT CASE
+    if (request.security(syminfo.tickerid, "D", close) < ema200_D) and h4_short and h1_short
+        if close < Pivot
+            entry_pp := close
+            stop_pp := R1 + toff  // stop above R1
+            placeEntry("PP_S", "S", true, entry_pp, stop_pp, ppRR, ppTrailATRmult, ppTrailStartR, ppTrailATRlen, ppTrailATRmult)
+            inTrade_pp := true
+
+if inTrade_pp and strategy.position_size == 0
+    inTrade_pp := false
+    entry_pp := na
+    stop_pp := na
+
+// trailing for PP
+if inTrade_pp and strategy.position_size != 0
+    initRisk_pp = math.abs(entry_pp - stop_pp)
+    currProfit_pp = (strategy.position_size > 0) ? (close - entry_pp) : (entry_pp - close)
+    if currProfit_pp >= ppTrailStartR * initRisk_pp
+        trailOffset_pp = ta.atr(ppTrailATRlen) * ppTrailATRmult
+        if strategy.position_size > 0
+            strategy.exit("PP_L_Trail", from_entry="PP_L", trail_offset=trailOffset_pp)
+            plotTrailDot("PP_L", close - trailOffset_pp)
+        else
+            strategy.exit("PP_S_Trail", from_entry="PP_S", trail_offset=trailOffset_pp)
+            plotTrailDot("PP_S", close + trailOffset_pp)
+
+// ============================================================================
+// ============================== Alerts ======================================
+// ============================================================================
+alertcondition(use180 and ringLow_180 and allowLong180, "180PC Long", "180PC Long candidate on {{ticker}}")
+alertcondition(use180 and ringHigh_180 and allowShort180, "180PC Short", "180PC Short candidate on {{ticker}}")
+alertcondition(usePP and entry_pp != na, "PowerPivot Entry", "Power Pivots entry on {{ticker}}")
+alertcondition(mode == "T-Wave" or mode == "All" and isBullPin, "T-Wave Long", "T-Wave bullish pin")
+alertcondition(mode == "T-Wave" or mode == "All" and isBearPin, "T-Wave Short", "T-Wave bearish pin")
+
+// ============================================================================
+// ============================== Placeholders =================================
+// ============================================================================
+// You can add more strategy modules here later — each module should:
+// - have its own grouped inputs
+// - be guarded by `useMyModule = (mode == "MyModule") or (mode == "All")`
+// - use placeEntry(..) to place orders and set per-module trail inputs and plotTrailDot(...) for yellow dot
+//
+// Example: add "Statistical Backtester" integration or a module that aggregates per-symbol metrics.
+//
+// ============================================================================
+// End of master strategy file
 
