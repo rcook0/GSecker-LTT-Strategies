@@ -4,21 +4,31 @@ from datetime import datetime, timedelta
 import random
 import argparse
 
-def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
-    strategies = ["180PC", "T-Wave", "Breakfast"]
-    dirs = ["long", "short"]
+# Full set of Secker strategy names we’ve built so far
+STRATEGIES = [
+    "180PC",
+    "T-Wave",
+    "Breakfast",
+    "Bollinger Bounce",
+    "Pip River",
+    "Pip Runner",
+    "Volatility Reversal",
+    "Power Pivots"
+]
 
+def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
+    dirs = ["long", "short"]
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     rows = []
 
     for i in range(n_trades):
-        strat = random.choice(strategies)
+        strat = random.choice(STRATEGIES)
         direction = random.choice(dirs)
 
         # Synthetic price levels
-        base_price = 100 + np.random.normal(0, 5)
-        risk = np.random.uniform(1.0, 3.0)  # distance to SL
-        reward = risk * np.random.choice([0.8, 1.0, 1.2, 2.0])  # RR between 0.8–2.0
+        base_price = 100 + np.random.normal(0, 10)   # random walk around 100
+        risk = np.random.uniform(1.0, 3.0)           # distance to SL
+        reward = risk * np.random.choice([0.8, 1.0, 1.5, 2.0])  # RR from 0.8–2.0
 
         if direction == "long":
             entry = base_price
@@ -65,7 +75,7 @@ def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
     return pd.DataFrame(rows)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate dummy trades.csv for backtester")
+    parser = argparse.ArgumentParser(description="Generate dummy trades.csv for Secker backtester")
     parser.add_argument("--trades", type=int, default=200, help="Number of trades to generate (default: 200)")
     parser.add_argument("--start", type=str, default="2025-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--out", type=str, default="trades.csv", help="Output CSV file")
