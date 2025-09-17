@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import random
 import argparse
 
-# Full set of Secker strategy names we’ve built so far
 STRATEGIES = [
     "180PC",
     "T-Wave",
@@ -16,19 +15,19 @@ STRATEGIES = [
     "Power Pivots"
 ]
 
-def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
+def generate_dummy_trades(n_trades=100, start_date="2025-01-01", fixed_strategy=None):
     dirs = ["long", "short"]
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     rows = []
 
     for i in range(n_trades):
-        strat = random.choice(STRATEGIES)
+        strat = fixed_strategy if fixed_strategy else random.choice(STRATEGIES)
         direction = random.choice(dirs)
 
         # Synthetic price levels
-        base_price = 100 + np.random.normal(0, 10)   # random walk around 100
-        risk = np.random.uniform(1.0, 3.0)           # distance to SL
-        reward = risk * np.random.choice([0.8, 1.0, 1.5, 2.0])  # RR from 0.8–2.0
+        base_price = 100 + np.random.normal(0, 10)
+        risk = np.random.uniform(1.0, 3.0)
+        reward = risk * np.random.choice([0.8, 1.0, 1.5, 2.0])
 
         if direction == "long":
             entry = base_price
@@ -41,7 +40,7 @@ def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
 
         # Entry timestamp
         entry_time = start_dt + timedelta(hours=i*6)
-        # Exit timestamp within 1–12 hours later
+        # Exit timestamp
         exit_time = entry_time + timedelta(hours=random.randint(1, 12))
 
         # Decide outcome
@@ -59,6 +58,21 @@ def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
             "tp": round(tp, 2),
             "price": ""
         })
+
+        # Occasionally add a trailing stop event
+        if random.random() < 0.2:  # 20% chance
+            trail_time = entry_time + timedelta(hours=random.randint(1, 6))
+            trail_price = (entry + exit_price) / 2  # somewhere between entry & exit
+            rows.append({
+                "timestamp": trail_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "strategy": strat,
+                "event": "trail",
+                "dir": direction,
+                "entry": round(entry, 2),
+                "sl": round(sl, 2),
+                "tp": round(tp, 2),
+                "price": round(trail_price, 2)
+            })
 
         # Exit row
         rows.append({
@@ -79,8 +93,17 @@ if __name__ == "__main__":
     parser.add_argument("--trades", type=int, default=200, help="Number of trades to generate (default: 200)")
     parser.add_argument("--start", type=str, default="2025-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--out", type=str, default="trades.csv", help="Output CSV file")
+    parser.add_argument("--strategy", type=str, choices=STRATEGIES, help="Generate only for one strategy (optional)")
     args = parser.parse_args()
 
-    df = generate_dummy_trades(n_trades=args.trades, start_date=args.start)
+    df = generate_dummy_trades(
+        n_trades=args.trades,
+        start_date=args.start,
+        fixed_strategy=args.strategy
+    )
     df.to_csv(args.out, index=False)
     print(f"✅ Dummy {args.out} generated with {args.trades} trades ({len(df)} rows)")
+    if args.strategy:
+        print(f"👉 Strategy fixed: {args.strategy}")
+    else:
+        print("👉 Strategy mix: uniform random across all")
