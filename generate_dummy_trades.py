@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import random
+import argparse
 
 def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
     strategies = ["180PC", "T-Wave", "Breakfast"]
@@ -64,6 +65,12 @@ def generate_dummy_trades(n_trades=100, start_date="2025-01-01"):
     return pd.DataFrame(rows)
 
 if __name__ == "__main__":
-    df = generate_dummy_trades(n_trades=200, start_date="2025-01-01")
-    df.to_csv("trades.csv", index=False)
-    print("✅ Dummy trades.csv generated with", len(df)//2, "trades (", len(df), "rows )")
+    parser = argparse.ArgumentParser(description="Generate dummy trades.csv for backtester")
+    parser.add_argument("--trades", type=int, default=200, help="Number of trades to generate (default: 200)")
+    parser.add_argument("--start", type=str, default="2025-01-01", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--out", type=str, default="trades.csv", help="Output CSV file")
+    args = parser.parse_args()
+
+    df = generate_dummy_trades(n_trades=args.trades, start_date=args.start)
+    df.to_csv(args.out, index=False)
+    print(f"✅ Dummy {args.out} generated with {args.trades} trades ({len(df)} rows)")
