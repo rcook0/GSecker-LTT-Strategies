@@ -1,0 +1,10 @@
+# Example lines written by SeckerMasterEA_v1_2.mq5 to MQL5/Files/secker_v1_ledger.csv
+#
+# Header (auto-created if the file is empty):
+# timestamp_utc,symbol,timeframe,strategy,position_id,magic,direction,event,qty,entry_price,sl_price,tp1_price,tpnext_price,event_price,comment
+#
+2026.02.13 14:20:00,EURUSD,H4,180PC,987654321,180100,BUY,order_place,0.10,1.08950,1.08750,1.09150,1.09350,1.08950,expiry_bars=2
+2026.02.13 14:25:12,EURUSD,H4,180PC,112233445,180100,BUY,entry,0.10,1.08950,1.08750,1.09150,1.09350,1.08952,market
+2026.02.13 15:10:03,EURUSD,H4,180PC,112233445,180100,BUY,be_set,0.10,1.08950,1.08950,1.09150,1.09350,1.09150,
+2026.02.13 16:00:00,EURUSD,H4,180PC,112233445,180100,BUY,trail_update,0.10,1.08950,1.09020,1.09150,1.09350,1.09210,
+2026.02.13 16:33:44,EURUSD,H4,180PC,112233445,180100,BUY,exit_tp,0.10,1.08950,0.00000,0.00000,0.00000,1.09350,deal=99887766 reason=3
